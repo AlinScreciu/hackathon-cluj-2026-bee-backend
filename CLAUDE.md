@@ -18,7 +18,7 @@ make db-up                    # postgres:16 on port 5433 (5432 is taken)
 make migrate-up               # apply 3 migrations
 make sqlc-gen                 # regenerate internal/db/sqlc/ (gitignored)
 make seed                     # load demo users + reference data
-make run                      # go run ./cmd/server  →  :8080
+make run                      # go run ./cmd/server  →  :9090
 ```
 
 For Twilio webhook testing:
@@ -32,7 +32,7 @@ make tunnel                   # cloudflared → copy HTTPS URL into APP_BASE_URL
 
 | Command | What it does |
 |---|---|
-| `make run` | Start server on :8080 |
+| `make run` | Start server on :9090 |
 | `make build` | Build binary `./radarul-api` |
 | `make test` | `go test ./... -v -count=1` |
 | `make lint` | `go vet ./...` |
@@ -77,14 +77,14 @@ internal/
   domain/
     enums.go                    All typed string constants (Role, Toxicity, states…)
     entities.go                 All domain structs (User, Apiary, SprayReport…)
-  services/                     Business logic — all empty stubs, filled in phases 4-11
+  services/                     Business logic — stubs filled as phases complete
     auth.go                     AuthService (login, 2FA, verify)
     cascade.go                  CascadeService (THE critical async notification engine)
     ledger.go                   LedgerService (SHA256 hash chain, advisory lock)
     geo.go                      Haversine distance + downwind bearing math
     pdf.go                      PDF generation for primărie reports
     seed.go                     Demo data seeding
-  external/                     Third-party clients — all empty stubs
+  external/                     Third-party clients — stubs filled as phases complete
     twilio/                     Twilio REST (voice calls, SMS)
     elevenlabs/                 ElevenLabs TTS (Romanian MP3)
     webpush/                    Web push via VAPID
@@ -119,13 +119,13 @@ type Handlers struct {
     cfg      *config.Config
     pool     *pgxpool.Pool
     jwt      *platform.JWTService
-    authSvc  *services.AuthService     // add Phase 4
+    authSvc  *services.AuthService     // DONE Phase 4
     ledger   *services.LedgerService   // add Phase 6
     cascade  *services.CascadeService  // add Phase 8
     weather  *weather.CachedClient     // add Phase 7
     geoai    geoai.Client              // add Phase 7
     pdf      *services.PDFService      // add Phase 9
-    email    *email.EmailClient        // add Phase 4
+    email    *email.EmailClient        // DONE Phase 4
 }
 ```
 
@@ -208,6 +208,26 @@ defer func() {
 }()
 ```
 
+**16. Use `stdlib.OpenDBFromPool` to get `*sql.DB` from `*pgxpool.Pool`**
+`*pgxpool.Pool` does NOT implement `DBTX` directly. To use sqlc-generated queries, call
+`stdlib.OpenDBFromPool(pool)` (from `github.com/jackc/pgx/v5/stdlib`) to obtain a `*sql.DB`,
+then pass it to `dbsqlc.New(db)`. Import path: `github.com/jackc/pgx/v5/stdlib`.
+
+**17. Error sentinel for "not found" is `sql.ErrNoRows` (not `pgx.ErrNoRows`)**
+When using the `stdlib` adapter (`stdlib.OpenDBFromPool`), the database/sql layer wraps pgx errors.
+Check for `errors.Is(err, sql.ErrNoRows)`, NOT `pgx.ErrNoRows`.
+
+**18. Chi group middleware does NOT apply to Huma-registered routes**
+Huma registers operations directly on the root chi router, bypassing any `r.Group(...)` or
+`r.Use(...)` middleware added after Huma setup. Auth is enforced via a passive session middleware
+on the root router (injects `*domain.User` into context if cookie is valid) plus per-handler
+`middleware.UserFromContext(ctx)` guards that return 401/403 explicitly.
+
+**19. `domain.User.ID` is `string`, not `uuid.UUID`**
+The `domain.User` struct stores `ID` as a plain `string` (it comes from the JWT claims).
+Any handler that passes `user.ID` to a sqlc parameter that expects `uuid.UUID` must call
+`uuid.Parse(user.ID)` first and return a 401 on error.
+
 ---
 
 ## Seeded Demo Users (after `make seed`)
@@ -253,8 +273,8 @@ Email is sent via Resend SMTP: host=`smtp.resend.com`, port=`465`, user=`apikey`
 
 ## Phase Tracking
 
-Phases 1–3 are COMPLETE (scaffold, DB migrations, HTTP skeleton with 501 stubs).
-Phases 4–11 are planned and waiting to be implemented.
+Phases 1–5 are COMPLETE (scaffold, DB migrations, HTTP skeleton, auth + seed users, seed data + reference endpoints + read paths).
+Phases 6–11 are planned and waiting to be implemented.
 
 Each phase has two files in `.planning/phases/`:
 - `phase-N-plan.md` — what to implement (exists = pending)

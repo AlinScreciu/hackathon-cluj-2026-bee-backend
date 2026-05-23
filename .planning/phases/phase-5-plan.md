@@ -9,11 +9,19 @@
 
 Phase 4 is COMPLETE. Auth flow works end-to-end. Now we need data to work with.
 
-What exists:
-- Full auth system working (login → cookie → /me)
-- `internal/api/apiaries.go`, `parcels.go`, `push.go`, `reference.go` — all still 501 stubs
-- `internal/db/sqlc/` — generated code with all query functions
-- Key sqlc functions available:
+### Already done (as of 2026-05-23 / Phase 4 completion)
+
+- `internal/services/seed.go` — EXISTS and works. `Seed()` inserts all 7 demo users (Andrei Berar, Maria Costea, Ioan Lupu, Vasile Mureșan, Elena Popa, Gheorghe Stan, Inspector Județean Cluj) with bcrypt cost 12. Idempotent via `GetUserByCNP` check before inserting. **User seeding is complete — do not redo it.**
+- `cmd/server/main.go` — `--seed` flag already implemented; calls `services.Seed()` and exits.
+- `make seed` works and has been verified end-to-end.
+
+### Still missing / what Phase 5 must build
+
+- `services.Seed()` does NOT yet insert apiaries or parcels — that extension is the seed work for this phase.
+- `internal/api/apiaries.go`, `parcels.go`, `push.go`, `reference.go` — still 501 stubs (GET endpoints).
+
+### All sqlc functions available
+
   - `CreateUser(ctx, CreateUserParams) (User, error)` — params: `{ID, Cnp, FullName, Email, Phone, Role UserRole, County, Locality, PasswordHash}`
   - `GetUserByCNP(ctx, cnp) (User, error)` — for idempotency check
   - `CreateApiary(ctx, CreateApiaryParams) (Apiary, error)` — params: `{ID, OwnerID, Name, Type ApiaryType, Lat, Lng, HiveCount int32, StartDate time.Time, EndDate sql.NullTime, Notes sql.NullString}`
@@ -29,7 +37,6 @@ What exists:
   - `ListPushSubscriptionsByUser(ctx, userID) ([]PushSubscription, error)`
 - `dbsqlc.Apiary` struct: `{ID uuid.UUID, OwnerID uuid.UUID, Name string, Type ApiaryType, Lat float64, Lng float64, HiveCount int32, StartDate time.Time, EndDate sql.NullTime, Notes sql.NullString, CreatedAt time.Time}`
 - `dbsqlc.Parcel` struct: `{ID uuid.UUID, OwnerID uuid.UUID, Name string, CadastralNumber string, Lat float64, Lng float64, SurfaceHa float64, DefaultCrop sql.NullString, County string, Locality string}`
-- `cmd/server/main.go` — currently does NOT parse `--seed` flag
 
 ### Substances already seeded (migration 00002)
 
@@ -41,76 +48,26 @@ Check `internal/db/migrations/00002_seed_substances.sql` to see what's already t
 
 Phase 4 complete. DB running on port 5433. `make migrate-up` applied.
 
+### Critical implementation notes
+
+- **`dbsqlc.New` requires `*sql.DB`, not `*pgxpool.Pool`**: `pgxpool.Pool` does NOT implement the `DBTX` interface directly when using the stdlib-compat layer. Use `stdlib.OpenDBFromPool(pool)` (from `github.com/jackc/pgx/v5/stdlib`) to obtain a `*sql.DB`, then pass that to `dbsqlc.New`. Example:
+  ```go
+  sqlDB := stdlib.OpenDBFromPool(pool)
+  q := dbsqlc.New(sqlDB)
+  ```
+  **Update any existing code** in seed.go or handlers that currently does `dbsqlc.New(pool)` — if it compiles without this it means the queries package accepts pgxpool directly via a generated interface; check the actual generated `db.go` to confirm before changing.
+- **"Not found" error sentinel**: Use `sql.ErrNoRows` (from `database/sql`), NOT `pgx.ErrNoRows`. When checking for a missing row: `errors.Is(err, sql.ErrNoRows)`.
+- **App port is 9090** (set in `.env`). All `curl` test commands below use `:9090`, not `:8080`.
+
 ---
 
-## Files to Create
+## Files to Create / Modify
 
-### `internal/services/seed.go`
+### `internal/services/seed.go` — EXTEND (user seeding already done)
 
-Package: `services`
+The file already exists with `Seed()` inserting 7 users. **Do not touch the user-seeding code.**
 
-```go
-package services
-
-import (
-    "context"
-    "database/sql"
-    "log/slog"
-    "time"
-
-    "github.com/google/uuid"
-    "github.com/jackc/pgx/v5/pgxpool"
-    dbsqlc "github.com/radarul-albinelor/api/internal/db/sqlc"
-    "golang.org/x/crypto/bcrypt"
-)
-
-type SeedService struct {
-    db   *dbsqlc.Queries
-    pool *pgxpool.Pool
-}
-
-func NewSeedService(pool *pgxpool.Pool) *SeedService {
-    return &SeedService{db: dbsqlc.New(pool), pool: pool}
-}
-
-func (s *SeedService) Run(ctx context.Context) error {
-    // hash "parola123" at cost 12 — do this once, reuse for all users
-    hash, err := bcrypt.GenerateFromPassword([]byte("parola123"), 12)
-    if err != nil { return fmt.Errorf("bcrypt: %w", err) }
-    passwordHash := string(hash)
-
-    // insert users, apiaries, parcels
-    // all inserts are idempotent: check existence first
-}
-```
-
-#### Seeded Users
-
-| CNP           | Role      | FullName                  | Email                          | Phone           | County | Locality     |
-|---------------|-----------|---------------------------|--------------------------------|-----------------|--------|--------------|
-| 1850101123456 | apicultor | Andrei Berar              | andrei.berar@test.com          | +40721000001    | Cluj   | Apahida      |
-| 2900215654321 | apicultor | Maria Costea              | maria.costea@test.com          | +40721000002    | Cluj   | Florești     |
-| 1780530987654 | apicultor | Ioan Lupu                 | ioan.lupu@test.com             | +40721000003    | Cluj   | Jucu         |
-| 1920412111222 | fermier   | Vasile Mureșan            | vasile.muresan@test.com        | +40722000001    | Cluj   | Apahida      |
-| 2880721333444 | fermier   | Elena Popa                | elena.popa@test.com            | +40722000002    | Cluj   | Florești     |
-| 1751103555666 | fermier   | Gheorghe Stan             | gheorghe.stan@test.com         | +40722000003    | Cluj   | Jucu         |
-| 1680808777888 | inspector | Inspector Județean Cluj   | inspector.cluj@test.com        | +40733000001    | Cluj   | Cluj-Napoca  |
-
-All passwords: `parola123` (bcrypt cost 12)
-
-#### Idempotency Pattern
-
-```go
-func (s *SeedService) ensureUser(ctx context.Context, cnp string, params dbsqlc.CreateUserParams) (dbsqlc.User, error) {
-    existing, err := s.db.GetUserByCNP(ctx, cnp)
-    if err == nil {
-        slog.Info("seed: user already exists", "cnp_prefix", cnp[:4])
-        return existing, nil
-    }
-    // errors.Is(err, pgx.ErrNoRows) or sql.ErrNoRows
-    return s.db.CreateUser(ctx, params)
-}
-```
+Extend `Seed()` (or add a helper called from it) to also insert apiaries and parcels after the users have been ensured.
 
 #### Apiaries (2 per apicultor)
 
@@ -192,28 +149,13 @@ dbsqlc.CreateParcelParams{
 
 ---
 
-## Files to Modify
+### `cmd/server/main.go` — ALREADY DONE (skip)
 
-### `cmd/server/main.go`
+`--seed` flag is implemented and working. No changes needed.
 
-Add `--seed` flag detection after DB connection established but before building the router:
+---
 
-```go
-// After pool.Ping succeeds:
-for _, arg := range os.Args[1:] {
-    if arg == "--seed" {
-        seedSvc := services.NewSeedService(pool)
-        if err := seedSvc.Run(ctx); err != nil {
-            slog.Error("seed failed", "err", err)
-            os.Exit(1)
-        }
-        slog.Info("seed complete")
-        os.Exit(0)
-    }
-}
-```
-
-Add import: `"github.com/radarul-albinelor/api/internal/services"`
+## HTTP Handlers to Implement
 
 ### `internal/api/apiaries.go`
 
@@ -397,16 +339,17 @@ Implementation: `CreatePushSubscription(ctx, dbsqlc.CreatePushSubscriptionParams
 
 6. **`dbsqlc.UserRole`**: When creating users in seed, use the enum constants: `dbsqlc.UserRoleApicultor`, `dbsqlc.UserRoleFermier`, `dbsqlc.UserRoleInspector`.
 
-7. **`pgx.ErrNoRows` import**: Use `"github.com/jackc/pgx/v5"` for the sentinel. Or catch with `errors.Is(err, sql.ErrNoRows)` if using the database/sql-compatible layer. Check what error is returned by testing: `errors.Is(err, pgx.ErrNoRows)` should work since pgxpool wraps it.
+7. **"Not found" error sentinel**: Use `sql.ErrNoRows` from `"database/sql"`. Do NOT use `pgx.ErrNoRows` — the sqlc-generated layer surfaces `sql.ErrNoRows`. Check: `errors.Is(err, sql.ErrNoRows)`.
 
 ---
 
 ## Verification Steps
 
 ```bash
-# Run seed
+# Run seed (extends existing users with apiaries + parcels)
 make seed
 # Expected output: "seed complete" then exit
+# Users were already seeded in Phase 4; this run adds apiaries and parcels
 
 # Re-run seed (idempotency test)
 make seed
@@ -415,7 +358,7 @@ make seed
 # Check DB
 psql "postgres://radarul:radarul@localhost:5433/radarul?sslmode=disable" \
   -c "SELECT cnp, full_name, role FROM users ORDER BY role, full_name;"
-# Expected: 7 users
+# Expected: 7 users (already present from Phase 4)
 
 psql "postgres://radarul:radarul@localhost:5433/radarul?sslmode=disable" \
   -c "SELECT name, lat, lng FROM apiaries ORDER BY name;"
@@ -425,48 +368,48 @@ psql "postgres://radarul:radarul@localhost:5433/radarul?sslmode=disable" \
   -c "SELECT name, surface_ha FROM parcels ORDER BY name;"
 # Expected: 7 parcels
 
-# Start server
+# Start server (port 9090 as set in .env)
 go run ./cmd/server &
 
 # Login as apicultor Andrei Berar
-CHALLENGE=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
+CHALLENGE=$(curl -s -X POST http://localhost:9090/api/v1/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"cnp":"1850101123456","password":"parola123"}' | jq -r .challenge_id)
 echo "Challenge: $CHALLENGE"
 # Read code from server stdout: "[2FA SMS mock] code=XXXXXX"
 # Then verify:
-curl -s -X POST http://localhost:8080/api/v1/auth/2fa/verify \
+curl -s -X POST http://localhost:9090/api/v1/auth/2fa/verify \
   -H 'Content-Type: application/json' \
   -c /tmp/beekeeper_cookies.txt \
   -d "{\"challenge_id\":\"$CHALLENGE\",\"code\":\"XXXXXX\"}" | jq .
 
 # GET apiaries (as apicultor)
-curl -s http://localhost:8080/api/v1/apiaries -b /tmp/beekeeper_cookies.txt | jq .
+curl -s http://localhost:9090/api/v1/apiaries -b /tmp/beekeeper_cookies.txt | jq .
 # Expected: {"apiaries":[{...Stupina Andrei 1...},{...Stupina Andrei 2...}]}
 
 # Try parcels as apicultor → 403
-curl -s http://localhost:8080/api/v1/parcels -b /tmp/beekeeper_cookies.txt | jq .
+curl -s http://localhost:9090/api/v1/parcels -b /tmp/beekeeper_cookies.txt | jq .
 # Expected: {"error":{"code":"forbidden_role",...}} or 403
 
 # Login as fermier Vasile Mureșan and test parcels
-CHALLENGE2=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
+CHALLENGE2=$(curl -s -X POST http://localhost:9090/api/v1/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"cnp":"1920412111222","password":"parola123"}' | jq -r .challenge_id)
 # verify with code from stdout...
-curl -s http://localhost:8080/api/v1/parcels -b /tmp/farmer_cookies.txt | jq .
+curl -s http://localhost:9090/api/v1/parcels -b /tmp/farmer_cookies.txt | jq .
 # Expected: 2 parcels for Vasile Mureșan
 
 # GET substances (any logged-in user)
-curl -s http://localhost:8080/api/v1/reference/substances -b /tmp/beekeeper_cookies.txt | jq .
+curl -s http://localhost:9090/api/v1/reference/substances -b /tmp/beekeeper_cookies.txt | jq .
 # Expected: array of substances with label + toxicity
 
 # GET weather (hardcoded)
-curl -s 'http://localhost:8080/api/v1/reference/weather?lat=46.77&lng=23.59' \
+curl -s 'http://localhost:9090/api/v1/reference/weather?lat=46.77&lng=23.59' \
   -b /tmp/beekeeper_cookies.txt | jq .
 # Expected: {"wind_direction_deg":45,"wind_speed_ms":3.2,"temperature_c":18.5,"fetched_at":"..."}
 
 # Push subscription
-curl -s -X POST http://localhost:8080/api/v1/push/subscriptions \
+curl -s -X POST http://localhost:9090/api/v1/push/subscriptions \
   -H 'Content-Type: application/json' \
   -b /tmp/beekeeper_cookies.txt \
   -d '{"endpoint":"https://fcm.googleapis.com/test","p256dh":"abc","auth":"def"}' | jq .

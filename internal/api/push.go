@@ -5,6 +5,11 @@ import (
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/stdlib"
+
+	dbsqlc "github.com/radarul-albinelor/api/internal/db/sqlc"
+	"github.com/radarul-albinelor/api/internal/middleware"
 )
 
 func registerPushPublic(api huma.API, h *Handlers) {
@@ -49,12 +54,80 @@ func (h *Handlers) getVAPIDPublicKey(_ context.Context, _ *struct{}) (*struct {
 	}{Key: h.cfg.VAPIDPublicKey}}, nil
 }
 
-func (h *Handlers) createPushSubscription(_ context.Context, _ *struct{ Body any }) (*struct{ Body any }, error) {
-	return nil, huma.NewError(http.StatusNotImplemented, "not implemented")
+// CreatePushSubInput holds the body for registering a web push subscription.
+type CreatePushSubInput struct {
+	Body struct {
+		Endpoint string `json:"endpoint"`
+		Keys     struct {
+			P256dh string `json:"p256dh"`
+			Auth   string `json:"auth"`
+		} `json:"keys"`
+	}
 }
 
-func (h *Handlers) deletePushSubscription(_ context.Context, _ *struct {
+func (h *Handlers) createPushSubscription(ctx context.Context, input *CreatePushSubInput) (*struct {
+	Body struct {
+		ID string `json:"id"`
+	}
+}, error) {
+	user := middleware.UserFromContext(ctx)
+	if user == nil {
+		return nil, huma.NewError(http.StatusUnauthorized, "Sesiune invalidă sau expirată")
+	}
+
+	sqlDB := stdlib.OpenDBFromPool(h.pool)
+	q := dbsqlc.New(sqlDB)
+
+	userID, err := uuid.Parse(user.ID)
+	if err != nil {
+		return nil, huma.NewError(http.StatusUnauthorized, "Sesiune invalidă sau expirată")
+	}
+	row, err := q.CreatePushSubscription(ctx, dbsqlc.CreatePushSubscriptionParams{
+		ID:       uuid.New(),
+		UserID:   userID,
+		Endpoint: input.Body.Endpoint,
+		P256dh:   input.Body.Keys.P256dh,
+		Auth:     input.Body.Keys.Auth,
+	})
+	if err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare internă")
+	}
+
+	out := &struct {
+		Body struct {
+			ID string `json:"id"`
+		}
+	}{}
+	out.Body.ID = row.ID.String()
+	return out, nil
+}
+
+func (h *Handlers) deletePushSubscription(ctx context.Context, input *struct {
 	ID string `path:"id"`
 }) (*struct{}, error) {
-	return nil, huma.NewError(http.StatusNotImplemented, "not implemented")
+	user := middleware.UserFromContext(ctx)
+	if user == nil {
+		return nil, huma.NewError(http.StatusUnauthorized, "Sesiune invalidă sau expirată")
+	}
+
+	id, err := uuid.Parse(input.ID)
+	if err != nil {
+		return nil, huma.NewError(http.StatusBadRequest, "ID invalid")
+	}
+	userID, err := uuid.Parse(user.ID)
+	if err != nil {
+		return nil, huma.NewError(http.StatusUnauthorized, "Sesiune invalidă sau expirată")
+	}
+
+	sqlDB := stdlib.OpenDBFromPool(h.pool)
+	q := dbsqlc.New(sqlDB)
+
+	if err := q.DeletePushSubscription(ctx, dbsqlc.DeletePushSubscriptionParams{
+		ID:     id,
+		UserID: userID,
+	}); err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare internă")
+	}
+
+	return &struct{}{}, nil
 }

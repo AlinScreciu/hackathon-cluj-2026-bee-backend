@@ -117,8 +117,8 @@ Completed: <date>
 | 1 | Scaffold | COMPLETE |
 | 2 | Database: Migrations + sqlc | COMPLETE |
 | 3 | HTTP Skeleton: Huma + Chi, Middleware, OpenAPI | COMPLETE |
-| 4 | Auth: login → 2FA → cookie → /me | pending |
-| 5 | Seed data + GET-only endpoints (apiaries, parcels, substances) | pending |
+| 4 | Auth: login → 2FA → cookie → /me | COMPLETE |
+| 5 | Seed data + GET-only endpoints (apiaries, parcels, substances) | COMPLETE |
 | 6 | Ledger service (SHA256 hash chain) + PATCH /apiaries | pending |
 | 7 | AI geo mock + Open-Meteo weather with cache | pending |
 | 8 | Spray reports + cascade goroutines + Twilio webhook handling | pending |
@@ -150,6 +150,7 @@ These files include:
 ## Key Facts to Remember
 
 - **Postgres port: 5433** (not 5432 — taken by k8s-watch-infra on this dev machine)
+- **App port: 9090** (PORT=9090 in .env — not the default 8080)
 - **`internal/db/sqlc/` is gitignored** — always run `make sqlc-gen` after checkout
 - **`context.WithoutCancel(ctx)`** in all cascade goroutines (request context cancels on response)
 - **`pg_advisory_xact_lock(42)`** before every ledger chain-tip read
@@ -160,3 +161,23 @@ These files include:
 - **ElevenLabs model:** `eleven_multilingual_v2` — never strip diacritics
 - **One file per resource** in `internal/api/`
 - **`API_CONTRACT.MD`** is the source of truth for all types and endpoints
+
+### Phase 4 implementation discoveries (critical for phases 5+)
+
+- **`stdlib.OpenDBFromPool(pool)`** — `*pgxpool.Pool` does NOT implement `DBTX`. Use
+  `github.com/jackc/pgx/v5/stdlib` to get a `*sql.DB`, then pass to `dbsqlc.New(db)`.
+- **`sql.ErrNoRows`**, not `pgx.ErrNoRows** — when using the stdlib adapter, check
+  `errors.Is(err, sql.ErrNoRows)` for not-found cases.
+- **Chi group middleware does NOT apply to Huma routes** — Huma registers on the root router
+  and bypasses any `r.Group` middleware. Auth is a passive session middleware on the root router
+  that injects `*domain.User` into context; each handler calls `middleware.UserFromContext(ctx)`
+  and returns 401/403 explicitly.
+- **Phase 5 note:** `seed.go` (7 demo users) and the `--seed` flag in `cmd/server/main.go` are
+  ALREADY implemented. Phase 5 only needs to extend `Seed()` with apiaries/parcels demo data
+  and implement the GET endpoints.
+
+### Phase 5 implementation discoveries (critical for phases 6+)
+
+- **`domain.User.ID` is `string`, not `uuid.UUID`** — every authenticated handler that passes
+  `user.ID` to a sqlc query param expecting `uuid.UUID` must call `uuid.Parse(user.ID)` first
+  and return 401 on parse error. This applies to all resource endpoints going forward.
