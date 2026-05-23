@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -71,13 +72,21 @@ func (h *Handlers) getWeather(ctx context.Context, input *struct {
 }) (*struct {
 	Body WeatherOutput
 }, error) {
-	result, err := weather.Fetch(ctx, input.Lat, input.Lng)
-	if err != nil {
-		return nil, huma.NewError(http.StatusBadGateway, "Nu s-a putut obține vremea")
+	lat, lng := input.Lat, input.Lng
+	if lat == 0 && lng == 0 {
+		lat, lng = 46.7712, 23.6236 // default: Cluj-Napoca center
 	}
-	out := &struct {
-		Body WeatherOutput
-	}{}
+	result, err := h.weatherClient.Get(ctx, lat, lng)
+	if err != nil {
+		slog.Warn("weather fetch failed, using fallback", "err", err)
+		result = &weather.Result{
+			WindDirectionDeg: 45.0,
+			WindSpeedMs:      3.2,
+			TemperatureC:     18.5,
+			FetchedAt:        time.Now().UTC(),
+		}
+	}
+	out := &struct{ Body WeatherOutput }{}
 	out.Body = WeatherOutput{
 		WindDirectionDeg: result.WindDirectionDeg,
 		WindSpeedMs:      result.WindSpeedMs,

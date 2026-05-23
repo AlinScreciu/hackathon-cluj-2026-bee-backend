@@ -120,7 +120,7 @@ Completed: <date>
 | 4 | Auth: login → 2FA → cookie → /me | COMPLETE |
 | 5 | Seed data + GET-only endpoints (apiaries, parcels, substances) | COMPLETE |
 | 6 | Ledger service (SHA256 hash chain) + PATCH /apiaries | COMPLETE |
-| 7 | AI geo mock + Open-Meteo weather with cache | pending |
+| 7 | AI geo mock + Open-Meteo weather with cache | COMPLETE |
 | 8 | Spray reports + cascade goroutines + Twilio webhook handling | pending |
 | 9 | Real Twilio + ElevenLabs TTS + Web Push + PDF + email | pending |
 | 10 | Inspector map endpoints + damage claims + photo upload | pending |
@@ -194,3 +194,11 @@ These files include:
   filter is needed.
 - **Cascade phases (8+)**: call `ledgerSvc.Append(ctx, tx, "spray.created", ...)` within the
   spray-report transaction, passing the same `*sql.Tx`.
+
+### Phase 7 implementation discoveries (critical for phases 8+)
+
+- **Real AI geo service endpoint is `POST /ai/risk-assess`** (not `/assess`). Running at `http://localhost:8000` (FastAPI). Set `GEO_AI_BASE_URL=http://localhost:8000` in `.env`.
+- **`geoai.Request` uses `Center{Lat, Lon}` (not `Lng`)** — matches real API's `"lon"` JSON field.
+- **`geoai.Request.Product.BeeToxicity`** should be set when calling from spray handler — values: `"low"`, `"medium"`, `"high"`, `"very_high"`. Maps from domain toxicity: T- → low, T → medium/high, T+ → very_high.
+- **`geoai.Result.RiskRadiusM`** comes from `notifyBeekeepersWithinMeters` in the API response. Use this as the Haversine threshold when finding affected apiaries in Phase 8.
+- **Weather cache is in `h.weatherClient`** — `*weather.CachedClient`. Phase 8 can call `h.weatherClient.Get(ctx, lat, lng)` to get wind direction for downwind bearing calculation.

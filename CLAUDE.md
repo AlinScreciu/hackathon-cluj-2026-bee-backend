@@ -228,6 +228,12 @@ The `domain.User` struct stores `ID` as a plain `string` (it comes from the JWT 
 Any handler that passes `user.ID` to a sqlc parameter that expects `uuid.UUID` must call
 `uuid.Parse(user.ID)` first and return a 401 on error.
 
+**20. `geoai.Request` uses `Center{Lat, Lon}` (lon not lng)**
+The real AI geo service uses `"lon"` in its JSON (not `"lng"`). The `geoai.Center` struct has `Lon float64 \`json:"lon"\``. Phase 8 spray handler must use `geoai.Center{Lat: parcel.Lat, Lon: parcel.Lng}` when constructing the request.
+
+**21. AI geo service endpoint is `POST /ai/risk-assess`**
+The real service (hackathon-cluj-2026-bee-ai-backend, FastAPI on :8000) uses `/ai/risk-assess`. Set `GEO_AI_BASE_URL=http://localhost:8000` locally. `geoai.HTTPClient` already targets this path.
+
 ---
 
 ## Seeded Demo Users (after `make seed`)
@@ -273,8 +279,8 @@ Email is sent via Resend SMTP: host=`smtp.resend.com`, port=`465`, user=`apikey`
 
 ## Phase Tracking
 
-Phases 1–6 are COMPLETE (scaffold, DB migrations, HTTP skeleton, auth + seed users, seed data + reference endpoints + read paths, ledger service + PATCH apiaries).
-Phases 7–11 are planned and waiting to be implemented.
+Phases 1–7 are COMPLETE (scaffold, DB migrations, HTTP skeleton, auth + seed users, seed data + reference endpoints + read paths, ledger service + PATCH /apiaries, AI geo mock + Open-Meteo weather cache).
+Phases 8–11 are planned and waiting to be implemented.
 
 Each phase has two files in `.planning/phases/`:
 - `phase-N-plan.md` — what to implement (exists = pending)

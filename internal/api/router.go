@@ -12,20 +12,26 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"time"
+
 	"github.com/radarul-albinelor/api/internal/config"
 	"github.com/radarul-albinelor/api/internal/domain"
 	"github.com/radarul-albinelor/api/internal/external/email"
+	"github.com/radarul-albinelor/api/internal/external/geoai"
+	"github.com/radarul-albinelor/api/internal/external/weather"
 	"github.com/radarul-albinelor/api/internal/middleware"
 	"github.com/radarul-albinelor/api/internal/platform"
 	"github.com/radarul-albinelor/api/internal/services"
 )
 
 type Handlers struct {
-	cfg       *config.Config
-	pool      *pgxpool.Pool
-	jwt       *platform.JWTService
-	authSvc   *services.AuthService
-	ledgerSvc *services.LedgerService
+	cfg           *config.Config
+	pool          *pgxpool.Pool
+	jwt           *platform.JWTService
+	authSvc       *services.AuthService
+	ledgerSvc     *services.LedgerService
+	geoAI         geoai.Client
+	weatherClient *weather.CachedClient
 }
 
 func NewRouter(cfg *config.Config, pool *pgxpool.Pool) http.Handler {
@@ -56,8 +62,18 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool) http.Handler {
 	emailClient := email.NewClient("smtp.resend.com", 465, "apikey", cfg.ResendAPIKey, cfg.ResendFromEmail)
 	authSvc := services.NewAuthService(pool, jwtSvc, emailClient, cfg)
 	ledgerSvc := services.NewLedgerService(pool)
+	geoAIClient := geoai.NewClient(cfg.GeoAIBaseURL)
+	weatherClient := weather.NewCachedClient(10 * time.Minute)
 
-	h := &Handlers{cfg: cfg, pool: pool, jwt: jwtSvc, authSvc: authSvc, ledgerSvc: ledgerSvc}
+	h := &Handlers{
+		cfg:           cfg,
+		pool:          pool,
+		jwt:           jwtSvc,
+		authSvc:       authSvc,
+		ledgerSvc:     ledgerSvc,
+		geoAI:         geoAIClient,
+		weatherClient: weatherClient,
+	}
 
 	humaAPI := humachi.New(r, huma.DefaultConfig("Radarul Albinelor", "1.0.0"))
 
