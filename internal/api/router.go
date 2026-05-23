@@ -21,10 +21,11 @@ import (
 )
 
 type Handlers struct {
-	cfg     *config.Config
-	pool    *pgxpool.Pool
-	jwt     *platform.JWTService
-	authSvc *services.AuthService
+	cfg       *config.Config
+	pool      *pgxpool.Pool
+	jwt       *platform.JWTService
+	authSvc   *services.AuthService
+	ledgerSvc *services.LedgerService
 }
 
 func NewRouter(cfg *config.Config, pool *pgxpool.Pool) http.Handler {
@@ -54,8 +55,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool) http.Handler {
 
 	emailClient := email.NewClient("smtp.resend.com", 465, "apikey", cfg.ResendAPIKey, cfg.ResendFromEmail)
 	authSvc := services.NewAuthService(pool, jwtSvc, emailClient, cfg)
+	ledgerSvc := services.NewLedgerService(pool)
 
-	h := &Handlers{cfg: cfg, pool: pool, jwt: jwtSvc, authSvc: authSvc}
+	h := &Handlers{cfg: cfg, pool: pool, jwt: jwtSvc, authSvc: authSvc, ledgerSvc: ledgerSvc}
 
 	humaAPI := humachi.New(r, huma.DefaultConfig("Radarul Albinelor", "1.0.0"))
 

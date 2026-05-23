@@ -5,6 +5,8 @@ import (
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/radarul-albinelor/api/internal/domain"
+	"github.com/radarul-albinelor/api/internal/services"
 )
 
 func registerLedger(api huma.API, h *Handlers) {
@@ -33,21 +35,63 @@ func registerLedger(api huma.API, h *Handlers) {
 	}, h.verifyLedger)
 }
 
-func (h *Handlers) listEvents(_ context.Context, _ *struct {
+func (h *Handlers) listEvents(ctx context.Context, input *struct {
 	Type   string `query:"type" required:"false"`
 	Actor  string `query:"actor" required:"false"`
 	Limit  int    `query:"limit" required:"false"`
-	Cursor string `query:"cursor" required:"false"`
-}) (*struct{ Body any }, error) {
-	return nil, huma.NewError(http.StatusNotImplemented, "not implemented")
+	Offset int    `query:"offset" required:"false"`
+}) (*struct {
+	Body struct {
+		Events []domain.LedgerEvent `json:"events"`
+	}
+}, error) {
+	events, err := h.ledgerSvc.List(ctx, input.Type, input.Actor, input.Limit, input.Offset)
+	if err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare internă")
+	}
+	out := &struct {
+		Body struct {
+			Events []domain.LedgerEvent `json:"events"`
+		}
+	}{}
+	out.Body.Events = events
+	return out, nil
 }
 
-func (h *Handlers) getEventByHash(_ context.Context, _ *struct {
+func (h *Handlers) getEventByHash(ctx context.Context, input *struct {
 	Hash string `path:"hash"`
-}) (*struct{ Body any }, error) {
-	return nil, huma.NewError(http.StatusNotImplemented, "not implemented")
+}) (*struct {
+	Body struct {
+		Event *domain.LedgerEvent   `json:"event"`
+		Chain *services.LedgerChain `json:"chain"`
+	}
+}, error) {
+	event, chain, err := h.ledgerSvc.GetByHash(ctx, input.Hash)
+	if err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare internă")
+	}
+	if event == nil {
+		return nil, huma.NewError(http.StatusNotFound, "Evenimentul nu a fost găsit")
+	}
+	out := &struct {
+		Body struct {
+			Event *domain.LedgerEvent   `json:"event"`
+			Chain *services.LedgerChain `json:"chain"`
+		}
+	}{}
+	out.Body.Event = event
+	out.Body.Chain = chain
+	return out, nil
 }
 
-func (h *Handlers) verifyLedger(_ context.Context, _ *struct{}) (*struct{ Body any }, error) {
-	return nil, huma.NewError(http.StatusNotImplemented, "not implemented")
+func (h *Handlers) verifyLedger(ctx context.Context, _ *struct{}) (*struct {
+	Body *services.VerifyResult
+}, error) {
+	result, err := h.ledgerSvc.Verify(ctx)
+	if err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare internă")
+	}
+	return &struct {
+		Body *services.VerifyResult
+	}{Body: result}, nil
 }

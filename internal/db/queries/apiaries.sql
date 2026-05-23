@@ -20,4 +20,4 @@ WHERE id = $1
 RETURNING *;
 
 -- name: UpdateApiaryLedgerHash :exec
-UPDATE apiaries SET notes = notes WHERE id = $1;
+UPDATE apiaries SET ledger_hash = $2 WHERE id = $1;

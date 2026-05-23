@@ -67,7 +67,7 @@ func mapApiary(row dbsqlc.Apiary) ApiaryOutput {
 		Status:         "safe",
 		CurrentRisk:    ApiaryRiskOutput{ActiveAlerts: 0},
 		CreatedAt:      row.CreatedAt.Format(time.RFC3339),
-		LastLedgerHash: "",
+		LastLedgerHash: row.LedgerHash,
 	}
 }
 
@@ -191,9 +191,117 @@ func (h *Handlers) getApiary(ctx context.Context, input *struct {
 	return out, nil
 }
 
-func (h *Handlers) updateApiary(_ context.Context, _ *struct {
+func (h *Handlers) updateApiary(ctx context.Context, input *struct {
 	ID   string `path:"id"`
-	Body any
-}) (*struct{ Body any }, error) {
-	return nil, huma.NewError(http.StatusNotImplemented, "not implemented")
+	Body struct {
+		Name      *string `json:"name,omitempty"`
+		HiveCount *int32  `json:"hive_count,omitempty"`
+		Notes     *string `json:"notes,omitempty"`
+		Type      *string `json:"type,omitempty"`
+	}
+}) (*struct {
+	Body struct {
+		Apiary     ApiaryOutput `json:"apiary"`
+		LedgerHash string       `json:"ledger_hash"`
+	}
+}, error) {
+	user := middleware.UserFromContext(ctx)
+	if user == nil {
+		return nil, huma.NewError(http.StatusUnauthorized, "Sesiune invalidă sau expirată")
+	}
+	if user.Role != domain.RoleApicultor {
+		return nil, huma.NewError(http.StatusForbidden, "Acces interzis")
+	}
+
+	apiaryID, err := uuid.Parse(input.ID)
+	if err != nil {
+		return nil, huma.NewError(http.StatusBadRequest, "ID invalid")
+	}
+
+	sqlDB := stdlib.OpenDBFromPool(h.pool)
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare internă")
+	}
+	defer tx.Rollback()
+
+	q := dbsqlc.New(tx)
+
+	current, err := q.GetApiary(ctx, apiaryID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, huma.NewError(http.StatusNotFound, "Stupina nu a fost găsită")
+	}
+	if err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare internă")
+	}
+
+	if current.OwnerID.String() != user.ID {
+		return nil, huma.NewError(http.StatusForbidden, "Nu aveți acces la această stupină")
+	}
+
+	name := current.Name
+	if input.Body.Name != nil {
+		name = *input.Body.Name
+	}
+	hiveCount := current.HiveCount
+	if input.Body.HiveCount != nil {
+		hiveCount = *input.Body.HiveCount
+	}
+	notes := current.Notes
+	if input.Body.Notes != nil {
+		notes = sql.NullString{String: *input.Body.Notes, Valid: true}
+	}
+	apiaryType := current.Type
+	if input.Body.Type != nil {
+		apiaryType = dbsqlc.ApiaryType(*input.Body.Type)
+	}
+
+	updated, err := q.UpdateApiary(ctx, dbsqlc.UpdateApiaryParams{
+		ID:        apiaryID,
+		Name:      name,
+		Type:      apiaryType,
+		Lat:       current.Lat,
+		Lng:       current.Lng,
+		HiveCount: hiveCount,
+		StartDate: current.StartDate,
+		EndDate:   current.EndDate,
+		Notes:     notes,
+	})
+	if err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare internă")
+	}
+
+	actorID := user.ID
+	ledgerHash, err := h.ledgerSvc.Append(ctx, tx, "apiary.updated", &actorID, map[string]any{
+		"apiary_id":  apiaryID.String(),
+		"name":       name,
+		"hive_count": hiveCount,
+	})
+	if err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare internă")
+	}
+
+	if err := q.UpdateApiaryLedgerHash(ctx, dbsqlc.UpdateApiaryLedgerHashParams{
+		ID:         apiaryID,
+		LedgerHash: ledgerHash,
+	}); err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare internă")
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare internă")
+	}
+
+	resp := mapApiary(updated)
+	resp.LastLedgerHash = ledgerHash
+
+	out := &struct {
+		Body struct {
+			Apiary     ApiaryOutput `json:"apiary"`
+			LedgerHash string       `json:"ledger_hash"`
+		}
+	}{}
+	out.Body.Apiary = resp
+	out.Body.LedgerHash = ledgerHash
+	return out, nil
 }

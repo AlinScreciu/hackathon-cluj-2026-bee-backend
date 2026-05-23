@@ -273,8 +273,8 @@ Email is sent via Resend SMTP: host=`smtp.resend.com`, port=`465`, user=`apikey`
 
 ## Phase Tracking
 
-Phases 1–5 are COMPLETE (scaffold, DB migrations, HTTP skeleton, auth + seed users, seed data + reference endpoints + read paths).
-Phases 6–11 are planned and waiting to be implemented.
+Phases 1–6 are COMPLETE (scaffold, DB migrations, HTTP skeleton, auth + seed users, seed data + reference endpoints + read paths, ledger service + PATCH apiaries).
+Phases 7–11 are planned and waiting to be implemented.
 
 Each phase has two files in `.planning/phases/`:
 - `phase-N-plan.md` — what to implement (exists = pending)

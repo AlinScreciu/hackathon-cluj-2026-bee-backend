@@ -24,3 +24,9 @@ LIMIT $3 OFFSET $4;
 
 -- name: CountLedgerEvents :one
 SELECT COUNT(*) FROM ledger_events;
+
+-- name: ListLedgerEventsByType :many
+SELECT * FROM ledger_events
+WHERE ($1::text = '' OR type = $1)
+ORDER BY created_at DESC
+LIMIT $2 OFFSET $3;

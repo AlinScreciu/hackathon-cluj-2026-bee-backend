@@ -119,7 +119,7 @@ Completed: <date>
 | 3 | HTTP Skeleton: Huma + Chi, Middleware, OpenAPI | COMPLETE |
 | 4 | Auth: login → 2FA → cookie → /me | COMPLETE |
 | 5 | Seed data + GET-only endpoints (apiaries, parcels, substances) | COMPLETE |
-| 6 | Ledger service (SHA256 hash chain) + PATCH /apiaries | pending |
+| 6 | Ledger service (SHA256 hash chain) + PATCH /apiaries | COMPLETE |
 | 7 | AI geo mock + Open-Meteo weather with cache | pending |
 | 8 | Spray reports + cascade goroutines + Twilio webhook handling | pending |
 | 9 | Real Twilio + ElevenLabs TTS + Web Push + PDF + email | pending |
@@ -181,3 +181,16 @@ These files include:
 - **`domain.User.ID` is `string`, not `uuid.UUID`** — every authenticated handler that passes
   `user.ID` to a sqlc query param expecting `uuid.UUID` must call `uuid.Parse(user.ID)` first
   and return 401 on parse error. This applies to all resource endpoints going forward.
+
+### Phase 6 implementation discoveries (critical for phases 7+)
+
+- **`LedgerService.Append(ctx, tx *sql.Tx, ...)` takes `*sql.Tx`, not `pgx.Tx`** — DBTX is
+  database/sql-style. Get transactions via `stdlib.OpenDBFromPool(pool).BeginTx(ctx, nil)`.
+  Pass `nil` for tx to let Append manage its own transaction.
+- **`pg_advisory_xact_lock(42)`** via `tx.ExecContext` serializes all ledger appends within a
+  transaction. Always use this before reading the chain tip.
+- **`ListLedgerEventsPaginated` actor UUID bug**: `$2::uuid IS NULL` evaluates to FALSE when
+  zero `uuid.UUID{}` passed via stdlib driver. Use `ListLedgerEventsByType` when no actor
+  filter is needed.
+- **Cascade phases (8+)**: call `ledgerSvc.Append(ctx, tx, "spray.created", ...)` within the
+  spray-report transaction, passing the same `*sql.Tx`.
