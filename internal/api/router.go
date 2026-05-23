@@ -6,19 +6,22 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humachi"
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"time"
 
 	"github.com/radarul-albinelor/api/internal/config"
 	"github.com/radarul-albinelor/api/internal/domain"
 	"github.com/radarul-albinelor/api/internal/external/email"
+	"github.com/radarul-albinelor/api/internal/external/elevenlabs"
 	"github.com/radarul-albinelor/api/internal/external/geoai"
+	"github.com/radarul-albinelor/api/internal/external/twilio"
 	"github.com/radarul-albinelor/api/internal/external/weather"
+	"github.com/radarul-albinelor/api/internal/external/webpush"
 	"github.com/radarul-albinelor/api/internal/middleware"
 	"github.com/radarul-albinelor/api/internal/platform"
 	"github.com/radarul-albinelor/api/internal/services"
@@ -33,6 +36,11 @@ type Handlers struct {
 	cascade       *services.CascadeService
 	geoAI         geoai.Client
 	weatherClient *weather.CachedClient
+	emailClient   *email.EmailClient
+	twilioClient  *twilio.Client
+	elevenLabs    *elevenlabs.Client
+	pushClient    *webpush.Client
+	pdfSvc        *services.PDFService
 }
 
 func NewRouter(cfg *config.Config, pool *pgxpool.Pool) (http.Handler, func()) {
@@ -63,7 +71,28 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool) (http.Handler, func()) {
 	emailClient := email.NewClient("smtp.resend.com", 465, "apikey", cfg.ResendAPIKey, cfg.ResendFromEmail)
 	authSvc := services.NewAuthService(pool, jwtSvc, emailClient, cfg)
 	ledgerSvc := services.NewLedgerService(pool)
-	cascadeSvc := services.NewCascadeService(pool, ledgerSvc, nil, nil, cfg.AppBaseURL)
+
+	var twilioClient *twilio.Client
+	if cfg.TwilioAccountSID != "" && cfg.TwilioAuthToken != "" {
+		twilioClient = twilio.NewClient(cfg.TwilioAccountSID, cfg.TwilioAuthToken, cfg.TwilioFromPhone)
+	}
+
+	var elevenLabsClient *elevenlabs.Client
+	if cfg.ElevenLabsAPIKey != "" {
+		voiceID := cfg.ElevenLabsVoiceID
+		if voiceID == "" {
+			voiceID = "21m00Tcm4TlvDq8ikWAM"
+		}
+		elevenLabsClient = elevenlabs.NewClient(cfg.ElevenLabsAPIKey, voiceID)
+	}
+
+	var pushClient *webpush.Client
+	if cfg.VAPIDPublicKey != "" && cfg.VAPIDPrivateKey != "" {
+		pushClient = webpush.NewClient(cfg.VAPIDPublicKey, cfg.VAPIDPrivateKey)
+	}
+
+	pdfSvc := services.NewPDFService(cfg.AppBaseURL)
+	cascadeSvc := services.NewCascadeService(pool, ledgerSvc, twilioClient, pushClient, cfg.AppBaseURL)
 	geoAIClient := geoai.NewClient(cfg.GeoAIBaseURL)
 	weatherClient := weather.NewCachedClient(10 * time.Minute)
 
@@ -76,6 +105,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool) (http.Handler, func()) {
 		cascade:       cascadeSvc,
 		geoAI:         geoAIClient,
 		weatherClient: weatherClient,
+		emailClient:   emailClient,
+		twilioClient:  twilioClient,
+		elevenLabs:    elevenLabsClient,
+		pushClient:    pushClient,
+		pdfSvc:        pdfSvc,
 	}
 
 	humaAPI := humachi.New(r, huma.DefaultConfig("Radarul Albinelor", "1.0.0"))
@@ -103,6 +137,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool) (http.Handler, func()) {
 	registerReference(humaAPI, h)
 
 	writeOpenAPI(humaAPI)
+
+	r.Handle("/uploads/*", http.StripPrefix("/uploads/", http.FileServer(http.Dir("uploads"))))
+	r.Get("/api/v1/spray-reports/{id}/primarie-pdf", h.getPrimariePDF)
 
 	// Twilio webhooks as raw chi routes — Twilio sends form-encoded bodies and
 	// expects XML responses, so they bypass Huma.

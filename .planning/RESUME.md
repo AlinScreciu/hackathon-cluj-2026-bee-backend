@@ -122,7 +122,7 @@ Completed: <date>
 | 6 | Ledger service (SHA256 hash chain) + PATCH /apiaries | COMPLETE |
 | 7 | AI geo mock + Open-Meteo weather with cache | COMPLETE |
 | 8 | Spray reports + cascade goroutines + Twilio webhook handling | COMPLETE |
-| 9 | Real Twilio + ElevenLabs TTS + Web Push + PDF + email | pending |
+| 9 | Real Twilio + ElevenLabs TTS + Web Push + PDF + email | COMPLETE |
 | 10 | Inspector map endpoints + damage claims + photo upload | pending |
 | 11 | Tunnel, demo script, README, sliding JWT | pending |
 

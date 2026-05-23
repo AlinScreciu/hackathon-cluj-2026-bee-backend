@@ -5,10 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/stdlib"
 	dbsqlc "github.com/radarul-albinelor/api/internal/db/sqlc"
@@ -148,14 +152,6 @@ func registerSprayReports(api huma.API, h *Handlers) {
 		Summary:     "Poll cascade status",
 		Tags:        []string{"spray-reports"},
 	}, h.getCascadeStatus)
-
-	huma.Register(api, huma.Operation{
-		OperationID: "get-primarie-pdf",
-		Method:      http.MethodGet,
-		Path:        "/api/v1/spray-reports/{id}/primarie-pdf",
-		Summary:     "Download primarie PDF",
-		Tags:        []string{"spray-reports"},
-	}, h.getPrimariePDF)
 
 	huma.Register(api, huma.Operation{
 		OperationID: "cancel-spray-report",
@@ -368,6 +364,115 @@ func (h *Handlers) createSprayReport(ctx context.Context, input *CreateSprayInpu
 	spray.LedgerHash = sprayHash
 	spray.AffectedApiariesCount = int32(len(affected))
 
+	if h.pdfSvc != nil {
+		bgCtx := context.WithoutCancel(ctx)
+		capturedSprayID := sprayID
+		capturedFarmerID := farmerID
+		capturedParcelID := parcelID
+		capturedSprayHash := sprayHash
+		capturedSpray := spray
+		affectedCount := len(affected)
+		capturedActorID := user.ID
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("pdf goroutine panic", "recover", r, "spray_id", capturedSprayID)
+				}
+			}()
+
+			pdfQ := dbsqlc.New(stdlib.OpenDBFromPool(h.pool))
+
+			fCtx, fCancel := context.WithTimeout(bgCtx, 10*time.Second)
+			farmerRow, err := pdfQ.GetUserByID(fCtx, capturedFarmerID)
+			fCancel()
+			if err != nil {
+				slog.Error("pdf goroutine: get farmer", "err", err, "spray_id", capturedSprayID)
+				return
+			}
+
+			pCtx, pCancel := context.WithTimeout(bgCtx, 10*time.Second)
+			parcelRow, err := pdfQ.GetParcel(pCtx, capturedParcelID)
+			pCancel()
+			if err != nil {
+				slog.Error("pdf goroutine: get parcel", "err", err, "spray_id", capturedSprayID)
+				return
+			}
+
+			domainFarmer := domain.User{
+				ID:       farmerRow.ID.String(),
+				FullName: farmerRow.FullName,
+				CNP:      farmerRow.Cnp,
+				Email:    farmerRow.Email,
+				Phone:    farmerRow.Phone,
+				County:   farmerRow.County,
+				Locality: farmerRow.Locality,
+			}
+			domainParcel := domain.Parcel{
+				ID:       parcelRow.ID.String(),
+				Name:     parcelRow.Name,
+				Lat:      parcelRow.Lat,
+				Lng:      parcelRow.Lng,
+				County:   parcelRow.County,
+				Locality: parcelRow.Locality,
+			}
+			domainSpray := domain.SprayReport{
+				ID:                    capturedSprayID.String(),
+				Substance:             capturedSpray.Substance,
+				Toxicity:              domain.Toxicity(capturedSpray.Toxicity),
+				SurfaceHA:             capturedSpray.SurfaceHa,
+				ScheduledAt:           capturedSpray.ScheduledAt,
+				DurationHours:         capturedSpray.DurationHours,
+				Status:                domain.SprayStatus(capturedSpray.Status),
+				AffectedApiariesCount: affectedCount,
+				LedgerHash:            capturedSprayHash,
+			}
+
+			pdfBytes, err := h.pdfSvc.GeneratePrimariePDF(domainSpray, domainFarmer, domainParcel, affectedCount, capturedSprayHash)
+			if err != nil {
+				slog.Error("pdf goroutine: generate", "err", err, "spray_id", capturedSprayID)
+				return
+			}
+
+			pdfPath := filepath.Join("uploads", "pdfs", capturedSprayID.String()+"-primarie.pdf")
+			if err := os.WriteFile(pdfPath, pdfBytes, 0644); err != nil {
+				slog.Error("pdf goroutine: write file", "err", err, "spray_id", capturedSprayID)
+				return
+			}
+
+			if _, err := h.ledgerSvc.Append(bgCtx, nil, "pdf.generated", &capturedActorID, map[string]any{
+				"spray_id": capturedSprayID.String(),
+				"path":     pdfPath,
+			}); err != nil {
+				slog.Error("pdf goroutine: ledger pdf.generated", "err", err)
+			}
+
+			if h.emailClient != nil && h.cfg.PrimarieEmail != "" {
+				pdfURL := h.cfg.AppBaseURL + "/api/v1/spray-reports/" + capturedSprayID.String() + "/primarie-pdf"
+				subject := fmt.Sprintf("Notificare tratament pesticid - %s", capturedSpray.ScheduledAt.Format("02.01.2006"))
+				body := fmt.Sprintf(
+					"A fost inregistrat un tratament pesticid.\n\nSubstanta: %s\nData: %s\nSuprafata: %.2f ha\n\nDescarcati documentul PDF:\n%s\n\nHash registru: %s",
+					capturedSpray.Substance,
+					capturedSpray.ScheduledAt.Format("02.01.2006 15:04"),
+					capturedSpray.SurfaceHa,
+					pdfURL,
+					capturedSprayHash,
+				)
+				eCtx, eCancel := context.WithTimeout(bgCtx, 10*time.Second)
+				if err := h.emailClient.Send(eCtx, h.cfg.PrimarieEmail, subject, body); err != nil {
+					slog.Error("pdf goroutine: send email", "err", err)
+				}
+				eCancel()
+
+				if _, err := h.ledgerSvc.Append(bgCtx, nil, "email.sent", &capturedActorID, map[string]any{
+					"spray_id": capturedSprayID.String(),
+					"to":       h.cfg.PrimarieEmail,
+				}); err != nil {
+					slog.Error("pdf goroutine: ledger email.sent", "err", err)
+				}
+			}
+		}()
+	}
+
 	out := &CreateSprayOutput{}
 	out.Body.SprayReport = dbSprayToResponse(spray)
 	out.Body.AffectedApiaries = len(affected)
@@ -551,10 +656,20 @@ func (h *Handlers) cancelSprayReport(ctx context.Context, input *CancelSprayInpu
 // Stubs for Phase 9+
 // ---------------------------------------------------------------------------
 
-func (h *Handlers) getPrimariePDF(_ context.Context, _ *struct {
-	ID string `path:"id"`
-}) (*struct{ Body any }, error) {
-	return nil, huma.NewError(http.StatusNotImplemented, "not implemented")
+func (h *Handlers) getPrimariePDF(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	id := chi.URLParam(r, "id")
+	pdfPath := filepath.Join("uploads", "pdfs", id+"-primarie.pdf")
+	if _, err := os.Stat(pdfPath); os.IsNotExist(err) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Disposition", `attachment; filename="`+id+`-primarie.pdf"`)
+	http.ServeFile(w, r, pdfPath)
 }
 
 func (h *Handlers) anfExport(_ context.Context, _ *struct{ Body any }) (*struct{ Body any }, error) {

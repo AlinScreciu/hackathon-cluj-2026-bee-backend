@@ -36,6 +36,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	for _, dir := range []string{"uploads/pdfs", "uploads/voice", "uploads/photos"} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			slog.Error("failed to create upload dir", "dir", dir, "err", err)
+			os.Exit(1)
+		}
+	}
+
 	pool, err := pgxpool.New(ctx, cfg.DBConnStr)
 	if err != nil {
 		slog.Error("failed to create db pool", "err", err)

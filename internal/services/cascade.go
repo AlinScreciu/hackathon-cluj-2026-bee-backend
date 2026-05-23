@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -100,11 +101,28 @@ func (c *CascadeService) launchDispatch(ctx context.Context, dispatch dbsqlc.Ale
 	if c.pusher == nil {
 		slog.Info("cascade: [mock] push notification sent", "dispatch_id", dispatchID)
 	} else {
-		// A real implementation would fetch the beekeeper's push subscriptions
-		// and call c.pusher.Send for each one. Left as a no-op here because
-		// the subscription lookup query is not yet available in this phase.
-		slog.Info("cascade: push sender present but subscription lookup not implemented yet",
-			"dispatch_id", dispatchID)
+		pSubCtx, pSubCancel := context.WithTimeout(ctx, 10*time.Second)
+		subs, err := c.db.ListPushSubscriptionsByUser(pSubCtx, dispatch.BeekeeperID)
+		pSubCancel()
+		if err != nil {
+			slog.Error("cascade: list push subscriptions", "dispatch_id", dispatchID, "err", err)
+		} else {
+			payload := buildPushPayload(dispatch)
+			for _, sub := range subs {
+				domSub := domain.PushSubscription{
+					ID:       sub.ID.String(),
+					UserID:   sub.UserID.String(),
+					Endpoint: sub.Endpoint,
+					P256dh:   sub.P256dh,
+					Auth:     sub.Auth,
+				}
+				pCtx, pCancel := context.WithTimeout(ctx, 10*time.Second)
+				if sendErr := c.pusher.Send(pCtx, domSub, payload); sendErr != nil {
+					slog.Error("cascade: push send", "dispatch_id", dispatchID, "err", sendErr)
+				}
+				pCancel()
+			}
+		}
 	}
 
 	tCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -657,6 +675,23 @@ func (c *CascadeService) twilioCallStatusToState(status string) dbsqlc.CallState
 		slog.Warn("cascade: unknown twilio call status", "status", status)
 		return dbsqlc.CallStateFailed
 	}
+}
+
+// buildPushPayload marshals a JSON alert payload for web push notifications.
+func buildPushPayload(d dbsqlc.AlertDispatch) []byte {
+	type payload struct {
+		Type          string  `json:"type"`
+		DispatchID    string  `json:"dispatch_id"`
+		SprayReportID string  `json:"spray_report_id"`
+		DistanceM     float64 `json:"distance_m"`
+	}
+	data, _ := json.Marshal(payload{
+		Type:          "pesticide_alert",
+		DispatchID:    d.ID.String(),
+		SprayReportID: d.SprayReportID.String(),
+		DistanceM:     d.DistanceM,
+	})
+	return data
 }
 
 // twilioSMSStatusToState maps a Twilio MessageStatus string to our SmsState enum.
