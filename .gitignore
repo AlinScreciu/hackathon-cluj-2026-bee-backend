@@ -1,0 +1,24 @@
+# Env files
+.env
+.env.local
+
+# Build output
+radarul-api
+*.exe
+
+# Generated sqlc code
+internal/db/sqlc/
+
+# Uploaded files
+uploads/
+
+# OpenAPI (generated on startup)
+openapi.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
