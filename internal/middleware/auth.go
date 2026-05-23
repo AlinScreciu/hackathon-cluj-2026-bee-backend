@@ -66,6 +66,10 @@ func UserFromContext(ctx context.Context) *domain.User {
 	return u
 }
 
+func WithUser(ctx context.Context, user *domain.User) context.Context {
+	return context.WithValue(ctx, userContextKey, user)
+}
+
 func writeAuthError(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)

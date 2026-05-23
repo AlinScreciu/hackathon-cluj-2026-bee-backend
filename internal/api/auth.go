@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/radarul-albinelor/api/internal/middleware"
 )
 
 func registerAuth(api huma.API, h *Handlers) {
@@ -57,9 +58,9 @@ type LoginInput struct {
 }
 type LoginOutput struct {
 	Body struct {
-		ChallengeID        string `json:"challenge_id"`
-		Method             string `json:"method"`
-		MaskedDestination  string `json:"masked_destination"`
+		ChallengeID       string `json:"challenge_id"`
+		Method            string `json:"method"`
+		MaskedDestination string `json:"masked_destination"`
 	}
 }
 
@@ -83,7 +84,9 @@ type Verify2FAOutput struct {
 	}
 }
 
-type LogoutOutput struct{}
+type LogoutOutput struct {
+	SetCookie string `header:"Set-Cookie"`
+}
 
 type MeOutput struct {
 	Body struct {
@@ -91,22 +94,65 @@ type MeOutput struct {
 	}
 }
 
-func (h *Handlers) login(_ context.Context, _ *LoginInput) (*LoginOutput, error) {
-	return nil, huma.NewError(http.StatusNotImplemented, "not implemented")
+func (h *Handlers) login(ctx context.Context, input *LoginInput) (*LoginOutput, error) {
+	result, err := h.authSvc.Login(ctx, input.Body.CNP, input.Body.Password)
+	if err != nil {
+		return nil, err
+	}
+	out := &LoginOutput{}
+	out.Body.ChallengeID = result.ChallengeID
+	out.Body.Method = result.Method
+	out.Body.MaskedDestination = result.MaskedDestination
+	return out, nil
 }
 
-func (h *Handlers) switch2FAMethod(_ context.Context, _ *Switch2FAInput) (*LoginOutput, error) {
-	return nil, huma.NewError(http.StatusNotImplemented, "not implemented")
+func (h *Handlers) switch2FAMethod(ctx context.Context, input *Switch2FAInput) (*LoginOutput, error) {
+	result, err := h.authSvc.Switch2FAMethod(ctx, input.Body.ChallengeID, input.Body.Method)
+	if err != nil {
+		return nil, err
+	}
+	out := &LoginOutput{}
+	out.Body.ChallengeID = result.ChallengeID
+	out.Body.Method = result.Method
+	out.Body.MaskedDestination = result.MaskedDestination
+	return out, nil
 }
 
-func (h *Handlers) verify2FA(_ context.Context, _ *Verify2FAInput) (*Verify2FAOutput, error) {
-	return nil, huma.NewError(http.StatusNotImplemented, "not implemented")
+func (h *Handlers) verify2FA(ctx context.Context, input *Verify2FAInput) (*Verify2FAOutput, error) {
+	user, token, err := h.authSvc.Verify2FA(ctx, input.Body.ChallengeID, input.Body.Code)
+	if err != nil {
+		return nil, err
+	}
+	cookie := &http.Cookie{
+		Name:     "ra_session",
+		Value:    token,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Path:     "/",
+		MaxAge:   86400,
+	}
+	out := &Verify2FAOutput{}
+	out.SetCookie = cookie.String()
+	out.Body.User = user
+	return out, nil
 }
 
 func (h *Handlers) logout(_ context.Context, _ *struct{}) (*LogoutOutput, error) {
-	return nil, huma.NewError(http.StatusNotImplemented, "not implemented")
+	out := &LogoutOutput{}
+	out.SetCookie = "ra_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=-1"
+	return out, nil
 }
 
-func (h *Handlers) getMe(_ context.Context, _ *struct{}) (*MeOutput, error) {
-	return nil, huma.NewError(http.StatusNotImplemented, "not implemented")
+func (h *Handlers) getMe(ctx context.Context, _ *struct{}) (*MeOutput, error) {
+	sessionUser := middleware.UserFromContext(ctx)
+	if sessionUser == nil {
+		return nil, huma.NewError(http.StatusUnauthorized, "Sesiune invalidă sau expirată")
+	}
+	user, err := h.authSvc.GetUser(ctx, sessionUser.ID)
+	if err != nil {
+		return nil, err
+	}
+	out := &MeOutput{}
+	out.Body.User = user
+	return out, nil
 }

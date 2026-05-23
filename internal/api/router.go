@@ -13,14 +13,18 @@ import (
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/radarul-albinelor/api/internal/config"
+	"github.com/radarul-albinelor/api/internal/domain"
+	"github.com/radarul-albinelor/api/internal/external/email"
 	"github.com/radarul-albinelor/api/internal/middleware"
 	"github.com/radarul-albinelor/api/internal/platform"
+	"github.com/radarul-albinelor/api/internal/services"
 )
 
 type Handlers struct {
-	cfg  *config.Config
-	pool *pgxpool.Pool
-	jwt  *platform.JWTService
+	cfg     *config.Config
+	pool    *pgxpool.Pool
+	jwt     *platform.JWTService
+	authSvc *services.AuthService
 }
 
 func NewRouter(cfg *config.Config, pool *pgxpool.Pool) http.Handler {
@@ -32,7 +36,26 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool) http.Handler {
 	r.Use(middleware.CORS(cfg.AllowedOrigins))
 
 	jwtSvc := platform.NewJWTService(cfg.JWTSecret)
-	h := &Handlers{cfg: cfg, pool: pool, jwt: jwtSvc}
+
+	// Session middleware: reads ra_session cookie and injects user into context when
+	// valid. Runs on all routes (Huma and raw chi). Individual handlers enforce auth
+	// by calling middleware.UserFromContext and returning 401 when nil.
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if cookie, err := req.Cookie("ra_session"); err == nil {
+				if claims, err := jwtSvc.Verify(cookie.Value); err == nil {
+					user := &domain.User{ID: claims.UserID, Role: claims.Role, CNP: claims.CNP}
+					req = req.WithContext(middleware.WithUser(req.Context(), user))
+				}
+			}
+			next.ServeHTTP(w, req)
+		})
+	})
+
+	emailClient := email.NewClient("smtp.resend.com", 465, "apikey", cfg.ResendAPIKey, cfg.ResendFromEmail)
+	authSvc := services.NewAuthService(pool, jwtSvc, emailClient, cfg)
+
+	h := &Handlers{cfg: cfg, pool: pool, jwt: jwtSvc, authSvc: authSvc}
 
 	humaAPI := humachi.New(r, huma.DefaultConfig("Radarul Albinelor", "1.0.0"))
 
@@ -46,32 +69,18 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool) http.Handler {
 		return &HealthResponse{Body: struct{ Status string `json:"status"` }{"ok"}}, nil
 	})
 
-	// Auth routes — no session required
-	r.Group(func(r chi.Router) {
-		registerAuth(humaAPI, h)
-	})
-
-	// VAPID public key — no auth
+	registerAuth(humaAPI, h)
 	registerPushPublic(humaAPI, h)
-
-	// Protected routes
-	r.Group(func(r chi.Router) {
-		r.Use(middleware.RequireAuth(jwtSvc))
-		registerApiaries(humaAPI, h)
-		registerParcels(humaAPI, h)
-		registerSprayReports(humaAPI, h)
-		registerAlerts(humaAPI, h)
-		registerDamage(humaAPI, h)
-		registerInspector(humaAPI, h)
-		registerLedger(humaAPI, h)
-		registerPushProtected(humaAPI, h)
-		registerReference(humaAPI, h)
-	})
-
-	// Twilio webhooks — no session, Twilio signature validates internally
-	r.Group(func(r chi.Router) {
-		registerTwilioWebhooks(humaAPI, h)
-	})
+	registerApiaries(humaAPI, h)
+	registerParcels(humaAPI, h)
+	registerSprayReports(humaAPI, h)
+	registerAlerts(humaAPI, h)
+	registerDamage(humaAPI, h)
+	registerInspector(humaAPI, h)
+	registerLedger(humaAPI, h)
+	registerPushProtected(humaAPI, h)
+	registerReference(humaAPI, h)
+	registerTwilioWebhooks(humaAPI, h)
 
 	writeOpenAPI(humaAPI)
 

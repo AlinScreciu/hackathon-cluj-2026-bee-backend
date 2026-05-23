@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/radarul-albinelor/api/internal/api"
 	"github.com/radarul-albinelor/api/internal/config"
+	"github.com/radarul-albinelor/api/internal/services"
 )
 
 const version = "0.1.0"
@@ -47,6 +48,14 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("database connected")
+
+	if len(os.Args) > 1 && os.Args[1] == "--seed" {
+		if err := services.Seed(ctx, pool); err != nil {
+			slog.Error("seed failed", "err", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 
 	router := api.NewRouter(cfg, pool)
 
