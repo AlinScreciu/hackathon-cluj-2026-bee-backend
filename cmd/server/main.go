@@ -57,7 +57,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	router := api.NewRouter(cfg, pool)
+	router, cascadeShutdown := api.NewRouter(cfg, pool)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
@@ -78,6 +78,8 @@ func main() {
 
 	<-ctx.Done()
 	slog.Info("shutting down...")
+
+	cascadeShutdown()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

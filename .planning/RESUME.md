@@ -121,7 +121,7 @@ Completed: <date>
 | 5 | Seed data + GET-only endpoints (apiaries, parcels, substances) | COMPLETE |
 | 6 | Ledger service (SHA256 hash chain) + PATCH /apiaries | COMPLETE |
 | 7 | AI geo mock + Open-Meteo weather with cache | COMPLETE |
-| 8 | Spray reports + cascade goroutines + Twilio webhook handling | pending |
+| 8 | Spray reports + cascade goroutines + Twilio webhook handling | COMPLETE |
 | 9 | Real Twilio + ElevenLabs TTS + Web Push + PDF + email | pending |
 | 10 | Inspector map endpoints + damage claims + photo upload | pending |
 | 11 | Tunnel, demo script, README, sliding JWT | pending |
@@ -194,6 +194,14 @@ These files include:
   filter is needed.
 - **Cascade phases (8+)**: call `ledgerSvc.Append(ctx, tx, "spray.created", ...)` within the
   spray-report transaction, passing the same `*sql.Tx`.
+
+### Phase 8 implementation discoveries (critical for phases 9+)
+
+- **`NewRouter` returns `(http.Handler, func())`** — shutdown closure, not the concrete service. `main.go` calls it as `cascadeShutdown()`.
+- **`stdlib.OpenDBFromPool(pool)` everywhere** — pgxpool.Pool doesn't implement `PrepareContext` so can't be passed directly to `dbsqlc.New`. All handlers create `sqlDB` from stdlib.
+- **Spray transaction uses `*sql.Tx`** — `sqlDB.BeginTx(ctx, nil)` gives a `*sql.Tx` compatible with both `dbsqlc.New(tx)` and `ledgerSvc.Append(ctx, tx, ...)`. All spray + dispatch + ledger writes are atomic.
+- **CascadeService.Start called after tx.Commit** — goroutines must not start before the spray/dispatch rows are visible.
+- **GeoAI mock fires if server not started with `.env` sourced** — use `source .env && go run ./cmd/server` or `make run`.
 
 ### Phase 7 implementation discoveries (critical for phases 8+)
 

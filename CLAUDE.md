@@ -279,8 +279,8 @@ Email is sent via Resend SMTP: host=`smtp.resend.com`, port=`465`, user=`apikey`
 
 ## Phase Tracking
 
-Phases 1–7 are COMPLETE (scaffold, DB migrations, HTTP skeleton, auth + seed users, seed data + reference endpoints + read paths, ledger service + PATCH /apiaries, AI geo mock + Open-Meteo weather cache).
-Phases 8–11 are planned and waiting to be implemented.
+Phases 1–8 are COMPLETE (scaffold, DB migrations, HTTP skeleton, auth + seed users, seed data + reference endpoints + read paths, ledger service + PATCH /apiaries, AI geo mock + Open-Meteo weather cache, spray reports + cascade orchestration + Twilio webhooks).
+Phases 9–11 are planned and waiting to be implemented.
 
 Each phase has two files in `.planning/phases/`:
 - `phase-N-plan.md` — what to implement (exists = pending)

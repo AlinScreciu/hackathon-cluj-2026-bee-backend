@@ -30,11 +30,12 @@ type Handlers struct {
 	jwt           *platform.JWTService
 	authSvc       *services.AuthService
 	ledgerSvc     *services.LedgerService
+	cascade       *services.CascadeService
 	geoAI         geoai.Client
 	weatherClient *weather.CachedClient
 }
 
-func NewRouter(cfg *config.Config, pool *pgxpool.Pool) http.Handler {
+func NewRouter(cfg *config.Config, pool *pgxpool.Pool) (http.Handler, func()) {
 	r := chi.NewRouter()
 
 	r.Use(chimiddleware.RequestID)
@@ -62,6 +63,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool) http.Handler {
 	emailClient := email.NewClient("smtp.resend.com", 465, "apikey", cfg.ResendAPIKey, cfg.ResendFromEmail)
 	authSvc := services.NewAuthService(pool, jwtSvc, emailClient, cfg)
 	ledgerSvc := services.NewLedgerService(pool)
+	cascadeSvc := services.NewCascadeService(pool, ledgerSvc, nil, nil, cfg.AppBaseURL)
 	geoAIClient := geoai.NewClient(cfg.GeoAIBaseURL)
 	weatherClient := weather.NewCachedClient(10 * time.Minute)
 
@@ -71,6 +73,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool) http.Handler {
 		jwt:           jwtSvc,
 		authSvc:       authSvc,
 		ledgerSvc:     ledgerSvc,
+		cascade:       cascadeSvc,
 		geoAI:         geoAIClient,
 		weatherClient: weatherClient,
 	}
@@ -98,11 +101,17 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool) http.Handler {
 	registerLedger(humaAPI, h)
 	registerPushProtected(humaAPI, h)
 	registerReference(humaAPI, h)
-	registerTwilioWebhooks(humaAPI, h)
 
 	writeOpenAPI(humaAPI)
 
-	return r
+	// Twilio webhooks as raw chi routes — Twilio sends form-encoded bodies and
+	// expects XML responses, so they bypass Huma.
+	r.Post("/api/v1/webhooks/twilio/voice/gather", h.rawVoiceGather)
+	r.Post("/api/v1/webhooks/twilio/voice/status", h.rawVoiceStatus)
+	r.Post("/api/v1/webhooks/twilio/sms/inbound", h.rawSMSInbound)
+	r.Post("/api/v1/webhooks/twilio/sms/status", h.rawSMSStatus)
+
+	return r, cascadeSvc.Shutdown
 }
 
 func writeOpenAPI(api huma.API) {
