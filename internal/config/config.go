@@ -17,8 +17,10 @@ type Config struct {
 	TwilioAuthToken  string `env:"TWILIO_AUTH_TOKEN"`
 	TwilioFromPhone  string `env:"TWILIO_FROM_PHONE"`
 
-	ElevenLabsAPIKey  string `env:"ELEVENLABS_API_KEY"`
-	ElevenLabsVoiceID string `env:"ELEVENLABS_VOICE_ID" envDefault:"21m00Tcm4TlvDq8ikWAM"`
+	ElevenLabsAPIKey      string `env:"ELEVENLABS_API_KEY"`
+	ElevenLabsVoiceID     string `env:"ELEVENLABS_VOICE_ID"          envDefault:"21m00Tcm4TlvDq8ikWAM"`
+	ElevenLabsAgentID     string `env:"ELEVENLABS_AGENT_ID"`
+	ElevenLabsPhoneNumID  string `env:"ELEVENLABS_PHONE_NUMBER_ID"`
 
 	VAPIDPublicKey  string `env:"VAPID_PUBLIC_KEY"`
 	VAPIDPrivateKey string `env:"VAPID_PRIVATE_KEY"`
@@ -30,7 +32,22 @@ type Config struct {
 
 	GeoAIBaseURL string `env:"GEO_AI_BASE_URL"`
 
+	// Cloudflare R2 (for production audio cache). If any are empty, voice
+	// MP3s are stored on local disk under ./uploads/voice instead.
+	// The bucket is kept private — URLs handed to Twilio are short-lived
+	// S3 presigned GETs, so no R2_PUBLIC_BASE_URL is needed.
+	R2AccountID       string `env:"R2_ACCOUNT_ID"`
+	R2AccessKeyID     string `env:"R2_ACCESS_KEY_ID"`
+	R2SecretAccessKey string `env:"R2_SECRET_ACCESS_KEY"`
+	R2Bucket          string `env:"R2_BUCKET"`
+
 	AllowedOrigins []string `env:"ALLOWED_ORIGINS" envSeparator:"," envDefault:"http://localhost:3000"`
+}
+
+// R2Enabled reports whether all required R2 settings are present.
+func (c *Config) R2Enabled() bool {
+	return c.R2AccountID != "" && c.R2AccessKeyID != "" && c.R2SecretAccessKey != "" &&
+		c.R2Bucket != ""
 }
 
 func Load() (*Config, error) {

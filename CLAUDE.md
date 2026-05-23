@@ -86,11 +86,12 @@ internal/
     seed.go                     Demo data seeding
   external/                     Third-party clients — stubs filled as phases complete
     twilio/                     Twilio REST (voice calls, SMS)
-    elevenlabs/                 ElevenLabs TTS (Romanian MP3)
+    elevenlabs/                 ElevenLabs TTS — takes storage.Storage, has TextToSpeechURL (singleflight + in-mem cache + Prewarm)
     webpush/                    Web push via VAPID
     weather/                    Open-Meteo adapter + 10-min cache
     email/                      go-mail SMTP (Resend)
     geoai/                      AI geo assessment client + mock
+  storage/                      Audio-blob store: Local (dev) / R2 (deploy, presigned URLs)
   middleware/
     auth.go                     RequireAuth (cookie→ctx), RequireRole (403)
     cors.go                     CORS via rs/cors
@@ -143,14 +144,14 @@ type Handlers struct {
 ## Cascade Flow
 
 1. `POST /spray-reports` → validate → `geoai.Assess` → Haversine radius find → DB transaction (spray_report + alert_dispatches + ledger events) → commit → `cascade.Start(bgCtx, sprayID, dispatches)`
-2. `cascade.Start` → goroutine per dispatch: `launchDispatch`
-3. `launchDispatch` → send push notification → branch by toxicity:
-   - **T- (low):** set `call_state = "skipped"`, send SMS directly (no wait, SMS is primary alongside push)
-   - **T / T+ (med/high):** make Twilio voice call + start 60s SMS fallback timer
-4. Twilio calls `POST /webhooks/twilio/voice/gather` → return TwiML with ElevenLabs MP3 URL + `<Gather>`
-5. User presses 1 → Twilio calls back → `HandleCallConfirmed` → cancel SMS timer, set `final_status = "confirmed_call"`, append ledger event
-6. If 60s timer fires and no confirmation → `fireSMSFallback` → `SendSMS`
-7. User replies "DA" to SMS → `POST /webhooks/twilio/sms/inbound` → `HandleSMSConfirmed`
+2. `cascade.Start` → **groups dispatches by beekeeperID**, sorts each group by distance, launches **one goroutine per beekeeper** (the closest-apiary dispatch is the "primary"). Sibling dispatches stay in the DB for ledger granularity.
+3. `launchDispatch(primary, siblings)` → send push notification once per device → branch by toxicity:
+   - **T- (low):** set `call_state = "skipped"`, send SMS directly (push + SMS co-primary)
+   - **T / T+ (med/high):** push + Twilio voice call + SMS fired **simultaneously as co-primary** (no 60s fallback wait). Unconfirmed timeout still arms (30min escalation).
+4. Twilio calls `POST /webhooks/twilio/voice/gather` → return TwiML with ElevenLabs `<Play>` URL (R2 presigned, 1h TTL) + `<Gather>`. Voice text lists every affected apiary the beekeeper owns for this spray, not just the primary's.
+5. User presses 1 → Twilio calls back → `HandleCallConfirmed` → set `final_status = "confirmed_call"` on primary → `propagateFinalStatus` mirrors the status onto every sibling dispatch
+6. User replies "DA" to SMS → `POST /webhooks/twilio/sms/inbound` → `HandleSMSConfirmed` → same propagation pattern
+7. If 30min unconfirmed timer fires → mark primary `unconfirmed` → propagate to siblings
 
 ---
 
@@ -234,6 +235,36 @@ The real AI geo service uses `"lon"` in its JSON (not `"lng"`). The `geoai.Cente
 **21. AI geo service endpoint is `POST /ai/risk-assess`**
 The real service (hackathon-cluj-2026-bee-ai-backend, FastAPI on :8000) uses `/ai/risk-assess`. Set `GEO_AI_BASE_URL=http://localhost:8000` locally. `geoai.HTTPClient` already targets this path.
 
+**22. Voice audio cache uses `internal/storage` with R2 presigned URLs**
+The ElevenLabs client takes a `storage.Storage` dependency. R2 bucket stays **private**; `Storage.SignedURL(ctx, key, ttl)` mints short-lived S3 presigned GETs (1h TTL) for `<Play>` URLs. GDPR rationale: audio contains beekeeper first name + apiary name, which is indirectly identifying via the public ANSVSA registry. **Do NOT enable Public Access on the R2 bucket.** `R2_PUBLIC_BASE_URL` is intentionally NOT a config var.
+
+**23. TwiML `<Play>` URLs must be XML-escaped**
+Presigned URLs contain `?X-Amz-...&X-Amz-...&...`. Raw `&` in TwiML text breaks Twilio's XML parser. Use `xmlTextEscaper` (in `webhooks_twilio.go`) before injecting any URL into `<Play>`.
+
+**24. Per-beekeeper notification dedup, with state propagation**
+`cascade.Start` groups dispatches by `beekeeper_id` and launches one goroutine per beekeeper (closest apiary = "primary"). Outbound notifications (push/call/SMS) are one per beekeeper, text lists every affected apiary via `buildApiaryClause` / `buildVoiceApiaryClause`. When the primary resolves (any path), `propagateFinalStatus` mirrors the status onto sibling dispatch rows. Sibling rows keep their own apiary_id / distance_m for ledger granularity but never have their own Twilio SIDs.
+
+**25. SMS is co-primary for T/T+ (since 2026-05-24)**
+For all toxicities, SMS fires immediately alongside push (and call for T/T+). No 60s fallback timer. The 30-min unconfirmed-timeout timer remains. Beekeepers get push + (call if T/T+) + SMS simultaneously — any one channel confirms the alert via `propagateFinalStatus`.
+
+**26. Brand pronunciation: BeeLive is voiced as "Bi-Liv"**
+In any voice TTS template, write the brand as `Bi-Liv` (phonetic Romanian). Written/SMS contexts keep `BeeLive`.
+
+**27. `ListDispatchSiblings(spray_id, beekeeper_id)` is the canonical sibling lookup**
+Use it (not `ListDispatchesBySpray + filter`) when grouping a beekeeper's dispatches for a single spray. Returns rows sorted ascending by `distance_m`.
+
+**28. `damage_photos.url` stores an R2 key, not a URL**
+The column name is a lie — the value is an R2 key like `photos/abc-123.jpg`. Every read path (`GET /damage-claims*`, future inspector views) must convert it to a fresh 1h presigned GET via `h.storage.SignedURL`. Never persist a URL with a baked-in TTL; never return the raw key to the frontend. See `internal/api/damage.go:signedPhotoURLs`.
+
+**29. Sliding JWT renewal lives in the passive session middleware, not `RequireAuth`**
+`internal/middleware/auth.go:RequireAuth` exists but is unused (chi group middleware doesn't apply to Huma-registered routes — see rule #18). All cookie issuance/renewal must happen in the passive session middleware in `internal/api/router.go:63-86`. Adding a renewal hook to `RequireAuth` would be silently dead code.
+
+**30. anf-export is a raw chi route, not Huma**
+`POST /api/v1/spray-reports/anf-export` returns `application/pdf` and is registered via `r.Post(...)` in router.go alongside the Twilio webhooks. Don't add a `huma.Register` for that path — Huma can't easily emit binary bodies, and a Huma registration would shadow the chi route. Body parsing is manual JSON decode in `rawANFExport`.
+
+**31. SMS only fires once per cascade; never re-fire from terminal callbacks**
+`fireSMS` is called exactly once from `launchDispatch`, immediately. No 60s fallback, no on-call-terminal re-fire. `HandleCallTerminal` only updates DB state; it must not call `scheduleSMSFallback`. The `cancelSMSFallback` calls and `smsTimers` sync.Map are now harmless no-ops kept for code-stability — do not re-introduce a code path that arms a timer there.
+
 ---
 
 ## Seeded Demo Users (after `make seed`)
@@ -272,21 +303,31 @@ Copy `.env.example` → `.env` and fill in:
 | `PRIMARIE_EMAIL` | no | primărie recipient, default: primarie@beelive.ro |
 | `GEO_AI_BASE_URL` | no | leave empty to use built-in mock |
 | `ALLOWED_ORIGINS` | no | comma-separated, default: http://localhost:3000 |
+| `R2_ACCOUNT_ID` | prod | Cloudflare R2 account ID (subdomain of `*.r2.cloudflarestorage.com` endpoint) |
+| `R2_ACCESS_KEY_ID` | prod | from R2 → Manage R2 API Tokens (the S3-style creds, not the bearer token) |
+| `R2_SECRET_ACCESS_KEY` | prod | same source — shown only once at token creation |
+| `R2_BUCKET` | prod | e.g. `beelive-voice`. Bucket **must stay private** (no Public Access). |
 
-Email is sent via Resend SMTP: host=`smtp.resend.com`, port=`465`, user=`apikey`, pass=`RESEND_API_KEY`.
+Email is sent via Resend SMTP: host=`smtp.resend.com`, port=`465`, user=`resend`, pass=`RESEND_API_KEY`.
+
+R2: leave all four vars empty in dev → voice MP3s go to `./uploads/voice/` via the static file server. Set all four in prod → MP3s upload to R2 and Twilio fetches via short-lived presigned URLs (see Critical Rule #22).
 
 ---
 
 ## Phase Tracking
 
-Phases 1–9 are COMPLETE (scaffold, DB migrations, HTTP skeleton, auth + seed users, seed data + reference endpoints + read paths, ledger service + PATCH /apiaries, AI geo mock + Open-Meteo weather cache, spray reports + cascade orchestration + Twilio webhooks, real Twilio + ElevenLabs TTS + Web Push + PDF + email).
-Phases 10–11 are planned and waiting to be implemented.
+Phases 1–11 are COMPLETE.
 
-Each phase has two files in `.planning/phases/`:
-- `phase-N-plan.md` — what to implement (exists = pending)
-- `phase-N.md` — status after completion (exists = done)
+- **Phases 1–9** (scaffold → real external integrations): see `.planning/phases/phase-N.md` for each.
+- **Phase 9.5 (post-Phase-9, ad-hoc, complete 2026-05-24):** dev-bypass 2FA `000000`, dual SMS+email 2FA dispatch, BeeLive branding rename, cascade nil-interface fixes, Twilio sig validation skipped in dev, dynamic personalised voice alert text, ElevenLabs cache key includes voice ID, `internal/storage` package (Local + Cloudflare R2 with S3 presigned GETs for GDPR), `singleflight` + in-memory cache in elevenlabs client, prewarm static phrases on boot, XML-escape `<Play>` URLs, per-beekeeper notification dedup + state propagation (`propagateFinalStatus`), SMS co-primary for all toxicities, brand voiced as "Bi-Liv", SMS/voice templates reworded for clarity, "verificați SMS-ul" wording on timeout.
+- **Phase 10 (complete 2026-05-24):** Inspector dashboard + damage claims. `POST /apiaries`, `POST /uploads/sign` (real R2 presigned PUTs), `POST/GET /damage-claims`, `GET /inspector/map-data`, `GET /inspector/farmers`, `GET /inspector/farmers/:id`, `POST /spray-reports/anf-export`. Also removed the dormant duplicate-SMS path from `HandleCallTerminal` (SMS is co-primary; no need to re-fire on missed call).
+- **Phase 11 (complete 2026-05-24):** Sliding JWT renewal in passive session middleware; top-level `README.md`; user-visible brand polish (boot log, OpenAPI title, PDF subtitle now all say BeeLive).
 
-**To find the current phase:** look for the lowest N that has `phase-N-plan.md` but no `phase-N.md`.
+**Deferred:** `make demo-spray` automated script (waits on finalized demo accounts so the script doesn't bake in throwaway CNPs/IDs). Go-module rename `github.com/radarul-albinelor/api` → something matching the BeeLive brand is also deferred — internal-only path, never user-visible.
+
+Each phase has a file `phase-N.md` in `.planning/phases/`. A `phase-N-plan.md` next to it means the phase is still pending; once complete the plan file is deleted.
+
+**To find the current phase:** look for the lowest N that has `phase-N-plan.md` but no `phase-N.md`. (Currently none — all merged work is shipped.)
 
 See `.planning/RESUME.md` for the full resume checklist.
 

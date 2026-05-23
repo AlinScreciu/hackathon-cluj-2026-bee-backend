@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -81,11 +82,12 @@ func registerApiaries(api huma.API, h *Handlers) {
 	}, h.listApiaries)
 
 	huma.Register(api, huma.Operation{
-		OperationID: "create-apiary",
-		Method:      http.MethodPost,
-		Path:        "/api/v1/apiaries",
-		Summary:     "Register a new apiary",
-		Tags:        []string{"apiaries"},
+		OperationID:   "create-apiary",
+		Method:        http.MethodPost,
+		Path:          "/api/v1/apiaries",
+		Summary:       "Register a new apiary",
+		Tags:          []string{"apiaries"},
+		DefaultStatus: http.StatusCreated,
 	}, h.createApiary)
 
 	huma.Register(api, huma.Operation{
@@ -144,8 +146,141 @@ func (h *Handlers) listApiaries(ctx context.Context, _ *struct{}) (*struct {
 	return out, nil
 }
 
-func (h *Handlers) createApiary(_ context.Context, _ *struct{ Body any }) (*struct{ Body any }, error) {
-	return nil, huma.NewError(http.StatusNotImplemented, "not implemented")
+type CreateApiaryInput struct {
+	Body struct {
+		Name      string  `json:"name"`
+		Type      string  `json:"type"`
+		Lat       float64 `json:"lat"`
+		Lng       float64 `json:"lng"`
+		HiveCount int32   `json:"hive_count"`
+		StartDate string  `json:"start_date"`
+		EndDate   *string `json:"end_date,omitempty"`
+		Notes     *string `json:"notes,omitempty"`
+	}
+}
+
+type CreateApiaryOutput struct {
+	Body struct {
+		Apiary     ApiaryOutput `json:"apiary"`
+		LedgerHash string       `json:"ledger_hash"`
+	}
+}
+
+func (h *Handlers) createApiary(ctx context.Context, input *CreateApiaryInput) (*CreateApiaryOutput, error) {
+	user := middleware.UserFromContext(ctx)
+	if user == nil {
+		return nil, huma.NewError(http.StatusUnauthorized, "Sesiune invalidă sau expirată")
+	}
+	if user.Role != domain.RoleApicultor {
+		return nil, huma.NewError(http.StatusForbidden, "Acces interzis pentru rolul dumneavoastră")
+	}
+
+	ownerID, err := uuid.Parse(user.ID)
+	if err != nil {
+		return nil, huma.NewError(http.StatusUnauthorized, "Sesiune invalidă")
+	}
+
+	name := strings.TrimSpace(input.Body.Name)
+	if name == "" {
+		return nil, huma.NewError(http.StatusBadRequest, "Numele stupinei este obligatoriu")
+	}
+	if input.Body.Type != string(domain.ApiaryTypePermanent) && input.Body.Type != string(domain.ApiaryTypePastoral) {
+		return nil, huma.NewError(http.StatusBadRequest, "Tipul stupinei trebuie să fie 'permanent' sau 'pastoral'")
+	}
+	if input.Body.Lat < -90 || input.Body.Lat > 90 {
+		return nil, huma.NewError(http.StatusBadRequest, "Latitudine invalidă")
+	}
+	if input.Body.Lng < -180 || input.Body.Lng > 180 {
+		return nil, huma.NewError(http.StatusBadRequest, "Longitudine invalidă")
+	}
+	if input.Body.HiveCount < 0 {
+		return nil, huma.NewError(http.StatusBadRequest, "Numărul de stupi nu poate fi negativ")
+	}
+
+	startDate, err := time.Parse("2006-01-02", input.Body.StartDate)
+	if err != nil {
+		return nil, huma.NewError(http.StatusBadRequest, "Data de început trebuie să fie în format YYYY-MM-DD")
+	}
+
+	var endDate sql.NullTime
+	if input.Body.EndDate != nil && *input.Body.EndDate != "" {
+		t, err := time.Parse("2006-01-02", *input.Body.EndDate)
+		if err != nil {
+			return nil, huma.NewError(http.StatusBadRequest, "Data de sfârșit trebuie să fie în format YYYY-MM-DD")
+		}
+		if !t.After(startDate) {
+			return nil, huma.NewError(http.StatusBadRequest, "Data de sfârșit trebuie să fie după data de început")
+		}
+		endDate = sql.NullTime{Time: t, Valid: true}
+	}
+	if input.Body.Type == string(domain.ApiaryTypePastoral) && !endDate.Valid {
+		return nil, huma.NewError(http.StatusBadRequest, "Stupinele pastorale necesită o dată de sfârșit")
+	}
+
+	var notes sql.NullString
+	if input.Body.Notes != nil && *input.Body.Notes != "" {
+		notes = sql.NullString{String: *input.Body.Notes, Valid: true}
+	}
+
+	sqlDB := stdlib.OpenDBFromPool(h.pool)
+	tx, err := sqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare internă")
+	}
+	defer tx.Rollback()
+
+	q := dbsqlc.New(tx)
+
+	apiaryID := uuid.New()
+	created, err := q.CreateApiary(ctx, dbsqlc.CreateApiaryParams{
+		ID:        apiaryID,
+		OwnerID:   ownerID,
+		Name:      name,
+		Type:      dbsqlc.ApiaryType(input.Body.Type),
+		Lat:       input.Body.Lat,
+		Lng:       input.Body.Lng,
+		HiveCount: input.Body.HiveCount,
+		StartDate: startDate,
+		EndDate:   endDate,
+		Notes:     notes,
+	})
+	if err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare internă")
+	}
+
+	actorID := user.ID
+	ledgerHash, err := h.ledgerSvc.Append(ctx, tx, "apiary.registered", &actorID, map[string]any{
+		"apiary_id":  apiaryID.String(),
+		"owner_id":   ownerID.String(),
+		"name":       name,
+		"type":       input.Body.Type,
+		"lat":        input.Body.Lat,
+		"lng":        input.Body.Lng,
+		"hive_count": input.Body.HiveCount,
+		"start_date": input.Body.StartDate,
+	})
+	if err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare internă")
+	}
+
+	if err := q.UpdateApiaryLedgerHash(ctx, dbsqlc.UpdateApiaryLedgerHashParams{
+		ID:         apiaryID,
+		LedgerHash: ledgerHash,
+	}); err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare internă")
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare internă")
+	}
+
+	resp := mapApiary(created)
+	resp.LastLedgerHash = ledgerHash
+
+	out := &CreateApiaryOutput{}
+	out.Body.Apiary = resp
+	out.Body.LedgerHash = ledgerHash
+	return out, nil
 }
 
 func (h *Handlers) getApiary(ctx context.Context, input *struct {

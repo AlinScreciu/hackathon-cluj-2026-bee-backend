@@ -74,7 +74,7 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	slog.Info("radarul-albinelor-api starting", "version", version, "port", cfg.Port, "env", cfg.AppEnv)
+	slog.Info("beelive-api starting", "version", version, "port", cfg.Port, "env", cfg.AppEnv)
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

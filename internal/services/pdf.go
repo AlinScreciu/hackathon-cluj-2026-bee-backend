@@ -41,7 +41,7 @@ func (s *PDFService) GeneratePrimariePDF(spray domain.SprayReport, farmer domain
 	pdf.SetFont("Helvetica", "B", 14)
 	pdf.CellFormat(170, 10, romanize("NOTIFICARE TRATAMENT PESTICID"), "", 1, "C", false, 0, "")
 	pdf.SetFont("Helvetica", "", 8)
-	pdf.CellFormat(170, 6, romanize("Sistem Radarul Albinelor — document generat automat"), "", 1, "C", false, 0, "")
+	pdf.CellFormat(170, 6, romanize("Sistem BeeLive (beelive.ro) — document generat automat"), "", 1, "C", false, 0, "")
 	pdf.Ln(4)
 
 	// Table helper

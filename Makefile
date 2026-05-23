@@ -42,9 +42,9 @@ gen-vapid:
 	go run ./tools/gen-vapid/main.go
 
 tunnel:
-	@echo "Starting cloudflared tunnel to http://localhost:8080 ..."
+	@echo "Starting cloudflared tunnel to http://localhost:9090 ..."
 	@echo "Copy the HTTPS URL printed below and set APP_BASE_URL in your .env"
-	cloudflared tunnel --url http://localhost:8080
+	cloudflared tunnel --url http://localhost:9090
 
 demo-spray:
 	@bash scripts/demo-spray.sh

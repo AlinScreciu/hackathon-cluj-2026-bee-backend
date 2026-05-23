@@ -3,12 +3,14 @@ package api
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -161,13 +163,8 @@ func registerSprayReports(api huma.API, h *Handlers) {
 		Tags:        []string{"spray-reports"},
 	}, h.cancelSprayReport)
 
-	huma.Register(api, huma.Operation{
-		OperationID: "anf-export",
-		Method:      http.MethodPost,
-		Path:        "/api/v1/spray-reports/anf-export",
-		Summary:     "ANF 3-year audit export",
-		Tags:        []string{"spray-reports"},
-	}, h.anfExport)
+	// anf-export is registered as a raw chi route in router.go because it
+	// returns application/pdf rather than JSON.
 }
 
 // ---------------------------------------------------------------------------
@@ -672,8 +669,142 @@ func (h *Handlers) getPrimariePDF(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, pdfPath)
 }
 
-func (h *Handlers) anfExport(_ context.Context, _ *struct{ Body any }) (*struct{ Body any }, error) {
-	return nil, huma.NewError(http.StatusNotImplemented, "not implemented")
+// rawANFExport handles POST /api/v1/spray-reports/anf-export.
+// Returns application/pdf — written via raw chi (not Huma) so binary bytes
+// flow without content-negotiation gymnastics.
+// Body: {farmer_id?: string, from: "YYYY-MM-DD", to: "YYYY-MM-DD"}.
+// When farmer_id is omitted the export covers every farmer in the window.
+func (h *Handlers) rawANFExport(w http.ResponseWriter, r *http.Request) {
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if user.Role != domain.RoleInspector {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	var body struct {
+		FarmerID *string `json:"farmer_id,omitempty"`
+		From     string  `json:"from"`
+		To       string  `json:"to"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+
+	from, err := time.Parse("2006-01-02", body.From)
+	if err != nil {
+		http.Error(w, "invalid from date (YYYY-MM-DD)", http.StatusBadRequest)
+		return
+	}
+	to, err := time.Parse("2006-01-02", body.To)
+	if err != nil {
+		http.Error(w, "invalid to date (YYYY-MM-DD)", http.StatusBadRequest)
+		return
+	}
+	// End-of-day on "to".
+	to = to.Add(24*time.Hour - time.Second)
+	if to.Before(from) {
+		http.Error(w, "to must be after from", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	q := dbsqlc.New(stdlib.OpenDBFromPool(h.pool))
+
+	var rows []dbsqlc.SprayReport
+	var farmerForHeader dbsqlc.User
+	if body.FarmerID != nil && *body.FarmerID != "" {
+		farmerID, err := uuid.Parse(*body.FarmerID)
+		if err != nil {
+			http.Error(w, "invalid farmer_id", http.StatusBadRequest)
+			return
+		}
+		farmer, err := q.GetUserByID(ctx, farmerID)
+		if err != nil {
+			http.Error(w, "farmer not found", http.StatusNotFound)
+			return
+		}
+		farmerForHeader = farmer
+		rows, err = q.ListSprayReportsByFarmer(ctx, farmerID)
+		if err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		rows, err = q.ListAllSprayReports(ctx)
+		if err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		farmerForHeader = dbsqlc.User{FullName: "Toți fermierii"}
+	}
+
+	filtered := make([]dbsqlc.SprayReport, 0, len(rows))
+	for _, s := range rows {
+		if s.ScheduledAt.Before(from) || s.ScheduledAt.After(to) {
+			continue
+		}
+		filtered = append(filtered, s)
+	}
+
+	domainSprays := make([]domain.SprayReport, 0, len(filtered))
+	lastHash := ""
+	for _, s := range filtered {
+		var notes *string
+		if s.Notes.Valid {
+			notes = &s.Notes.String
+		}
+		domainSprays = append(domainSprays, domain.SprayReport{
+			ID:                    s.ID.String(),
+			FarmerID:              s.FarmerID.String(),
+			ParcelID:              s.ParcelID.String(),
+			Crop:                  s.Crop,
+			Substance:             s.Substance,
+			Toxicity:              domain.Toxicity(s.Toxicity),
+			SurfaceHA:             s.SurfaceHa,
+			ScheduledAt:           s.ScheduledAt,
+			DurationHours:         s.DurationHours,
+			Notes:                 notes,
+			Status:                domain.SprayStatus(s.Status),
+			AffectedApiariesCount: int(s.AffectedApiariesCount),
+			LedgerHash:            s.LedgerHash,
+			CreatedAt:             s.CreatedAt,
+		})
+		if s.LedgerHash != "" {
+			lastHash = s.LedgerHash
+		}
+	}
+
+	domainFarmer := domain.User{
+		ID:       farmerForHeader.ID.String(),
+		CNP:      farmerForHeader.Cnp,
+		FullName: farmerForHeader.FullName,
+		Email:    farmerForHeader.Email,
+		Phone:    farmerForHeader.Phone,
+		Role:     domain.Role(farmerForHeader.Role),
+		County:   farmerForHeader.County,
+		Locality: farmerForHeader.Locality,
+	}
+
+	if h.pdfSvc == nil {
+		http.Error(w, "pdf service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	pdfBytes, err := h.pdfSvc.GenerateANFExport(domainSprays, domainFarmer, lastHash)
+	if err != nil {
+		http.Error(w, "pdf generation failed", http.StatusInternalServerError)
+		return
+	}
+
+	filename := "anf-export-" + body.From + "_" + body.To + ".pdf"
+	w.Header().Set("Content-Type", "application/pdf")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	w.Header().Set("Content-Length", strconv.Itoa(len(pdfBytes)))
+	_, _ = w.Write(pdfBytes)
 }
 
 // ---------------------------------------------------------------------------

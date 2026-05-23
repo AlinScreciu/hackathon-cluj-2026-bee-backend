@@ -9,6 +9,14 @@ SELECT * FROM alert_dispatches WHERE id = $1 LIMIT 1;
 -- name: ListDispatchesBySpray :many
 SELECT * FROM alert_dispatches WHERE spray_report_id = $1 ORDER BY created_at;
 
+-- name: ListDispatchSiblings :many
+-- All dispatches belonging to the same beekeeper for the same spray, ordered
+-- closest-apiary-first. Used to coalesce per-beekeeper notifications and to
+-- propagate confirmation state from the primary dispatch to siblings.
+SELECT * FROM alert_dispatches
+WHERE spray_report_id = $1 AND beekeeper_id = $2
+ORDER BY distance_m ASC;
+
 -- name: ListActiveAlertsByBeekeeper :many
 SELECT ad.* FROM alert_dispatches ad
 WHERE ad.beekeeper_id = $1 AND ad.final_status IS NULL

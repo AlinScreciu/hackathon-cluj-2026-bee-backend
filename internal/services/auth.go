@@ -163,7 +163,10 @@ func (s *AuthService) Verify2FA(ctx context.Context, challengeIDStr, code string
 	if challenge.ExpiresAt.Before(time.Now()) || challenge.VerifiedAt.Valid {
 		return nil, "", humaerr.NewError(http.StatusUnauthorized, "invalid_2fa_code")
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(challenge.CodeHash), []byte(code)); err != nil {
+	// Dev bypass: "000000" skips bcrypt in non-production environments.
+	if s.cfg.AppEnv != "production" && code == "000000" {
+		slog.Info("[2FA DEV BYPASS] accepted 000000")
+	} else if err := bcrypt.CompareHashAndPassword([]byte(challenge.CodeHash), []byte(code)); err != nil {
 		return nil, "", humaerr.NewError(http.StatusUnauthorized, "invalid_2fa_code")
 	}
 
@@ -199,20 +202,25 @@ func (s *AuthService) GetUser(ctx context.Context, userIDStr string) (*domain.Us
 }
 
 func (s *AuthService) dispatchCode(ctx context.Context, user dbsqlc.User, method, code string) {
-	switch method {
-	case string(dbsqlc.AuthMethodPush):
-		slog.Info("[2FA PUSH]", "user_id", user.ID, "code", code)
-	case string(dbsqlc.AuthMethodSms):
-		msg := fmt.Sprintf("Codul dumneavoastră Radarul Albinelor: %s. Expiră în 10 minute.", code)
-		if err := sendTwilioSMS(ctx, s.cfg, user.Phone, msg); err != nil {
+	// Always log plaintext code so dev can grab it from terminal immediately.
+	slog.Info("[2FA CODE]", "user_id", user.ID, "method", method, "code", code)
+
+	smsMsg := fmt.Sprintf("BeeLive: codul dvs. este %s. Expiră în 10 minute.", code)
+	emailSubject := "Cod autentificare BeeLive"
+	emailBody := fmt.Sprintf("Codul dumneavoastră: %s\n\nExpiră în 10 minute.", code)
+
+	// Send via SMS if the user has a phone (regardless of chosen method).
+	if user.Phone != "" {
+		if err := sendTwilioSMS(ctx, s.cfg, user.Phone, smsMsg); err != nil {
 			slog.Error("SMS dispatch failed", "user_id", user.ID, "err", err)
 		}
-	case string(dbsqlc.AuthMethodEmail):
-		subject := "Cod autentificare Radarul Albinelor"
-		body := fmt.Sprintf("Codul dumneavoastră: %s\n\nExpiră în 10 minute.", code)
+	}
+
+	// Send via email if the user has an email (regardless of chosen method).
+	if user.Email != "" {
 		if s.email != nil {
-			if err := s.email.Send(ctx, user.Email, subject, body); err != nil {
-				slog.Info("[2FA EMAIL fallback]", "user_id", user.ID, "code", code, "err", err)
+			if err := s.email.Send(ctx, user.Email, emailSubject, emailBody); err != nil {
+				slog.Error("email dispatch failed", "user_id", user.ID, "err", err)
 			}
 		} else {
 			slog.Info("[2FA EMAIL mock]", "user_id", user.ID, "code", code)

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +29,11 @@ type PushSender interface {
 	Send(ctx context.Context, sub domain.PushSubscription, payload []byte) error
 }
 
+// ElevenLabsCaller is the subset of the ElevenLabs client used for outbound calls.
+type ElevenLabsCaller interface {
+	OutboundCall(ctx context.Context, toNumber string) (string, error)
+}
+
 // CascadeService orchestrates the full pesticide-spray alert notification cascade:
 // push → voice call (T/T+) / SMS (T-) → SMS fallback → unconfirmed timeout.
 type CascadeService struct {
@@ -35,8 +42,9 @@ type CascadeService struct {
 	pool   *pgxpool.Pool
 	ledger *LedgerService
 
-	notifier Notifier   // nil until Phase 8 wires real Twilio client
-	pusher   PushSender // nil until Phase 8 wires real push client
+	notifier    Notifier        // Twilio — nil when not configured
+	pusher      PushSender      // web push — nil when not configured
+	elevenLabs  ElevenLabsCaller // ElevenLabs outbound call — nil when not configured
 
 	// key: dispatchID string → *time.Timer
 	smsTimers         sync.Map
@@ -45,13 +53,14 @@ type CascadeService struct {
 	appBaseURL string
 }
 
-// NewCascadeService constructs the service. notifier and pusher may be nil
+// NewCascadeService constructs the service. notifier, pusher, and elevenLabs may be nil
 // (mock/log behaviour is used in that case).
 func NewCascadeService(
 	pool *pgxpool.Pool,
 	ledger *LedgerService,
 	notifier Notifier,
 	pusher PushSender,
+	elevenLabs ElevenLabsCaller,
 	appBaseURL string,
 ) *CascadeService {
 	sqlDB := stdlib.OpenDBFromPool(pool)
@@ -62,6 +71,7 @@ func NewCascadeService(
 		ledger:     ledger,
 		notifier:   notifier,
 		pusher:     pusher,
+		elevenLabs: elevenLabs,
 		appBaseURL: appBaseURL,
 	}
 }
@@ -70,13 +80,26 @@ func NewCascadeService(
 // Public entry point
 // ---------------------------------------------------------------------------
 
-// Start launches a background goroutine for each dispatch.
-// It detaches from the HTTP request context via context.WithoutCancel so the
+// Start launches a background goroutine PER BEEKEEPER (not per dispatch).
+// Each beekeeper with N affected apiaries gets one push + one call + one SMS
+// covering all their apiaries; the closest-apiary dispatch is the "primary"
+// and owns the Twilio SIDs. Sibling dispatch rows stay in the DB for ledger
+// granularity and have their final_status mirrored when the primary resolves.
+// Detaches from the HTTP request context via context.WithoutCancel so
 // goroutines are not killed when the response is sent.
 func (c *CascadeService) Start(ctx context.Context, sprayID string, dispatches []dbsqlc.AlertDispatch) {
 	bgCtx := context.WithoutCancel(ctx)
+
+	groups := make(map[uuid.UUID][]dbsqlc.AlertDispatch)
 	for _, d := range dispatches {
-		go c.launchDispatch(bgCtx, d)
+		groups[d.BeekeeperID] = append(groups[d.BeekeeperID], d)
+	}
+
+	for _, group := range groups {
+		sort.Slice(group, func(i, j int) bool {
+			return group[i].DistanceM < group[j].DistanceM
+		})
+		go c.launchDispatch(bgCtx, group[0], group[1:])
 	}
 }
 
@@ -84,30 +107,31 @@ func (c *CascadeService) Start(ctx context.Context, sprayID string, dispatches [
 // Internal per-dispatch orchestration
 // ---------------------------------------------------------------------------
 
-func (c *CascadeService) launchDispatch(ctx context.Context, dispatch dbsqlc.AlertDispatch) {
+func (c *CascadeService) launchDispatch(ctx context.Context, primary dbsqlc.AlertDispatch, siblings []dbsqlc.AlertDispatch) {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("cascade panic in launchDispatch",
 				"recover", r,
-				"dispatch_id", dispatch.ID,
+				"dispatch_id", primary.ID,
 			)
 		}
 	}()
 
-	dispatchID := dispatch.ID.String()
-	slog.Info("cascade: launching dispatch", "dispatch_id", dispatchID, "call_state", dispatch.CallState)
+	dispatchID := primary.ID.String()
+	slog.Info("cascade: launching dispatch",
+		"dispatch_id", dispatchID, "call_state", primary.CallState, "sibling_count", len(siblings))
 
-	// --- Push notification ---
+	// --- Push notification (one per device, regardless of apiary count) ---
 	if c.pusher == nil {
 		slog.Info("cascade: [mock] push notification sent", "dispatch_id", dispatchID)
 	} else {
 		pSubCtx, pSubCancel := context.WithTimeout(ctx, 10*time.Second)
-		subs, err := c.db.ListPushSubscriptionsByUser(pSubCtx, dispatch.BeekeeperID)
+		subs, err := c.db.ListPushSubscriptionsByUser(pSubCtx, primary.BeekeeperID)
 		pSubCancel()
 		if err != nil {
 			slog.Error("cascade: list push subscriptions", "dispatch_id", dispatchID, "err", err)
 		} else {
-			payload := buildPushPayload(dispatch)
+			payload := buildPushPayload(primary)
 			for _, sub := range subs {
 				domSub := domain.PushSubscription{
 					ID:       sub.ID.String(),
@@ -125,29 +149,71 @@ func (c *CascadeService) launchDispatch(ctx context.Context, dispatch dbsqlc.Ale
 		}
 	}
 
-	tCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	if err := c.db.UpdatePushState(tCtx, dbsqlc.UpdatePushStateParams{
-		ID:        dispatch.ID,
-		PushState: dbsqlc.PushStateSent,
-	}); err != nil {
-		slog.Error("cascade: update push state", "dispatch_id", dispatchID, "err", err)
+	// Mark push_state=sent on the primary AND every sibling so the alerts UI
+	// doesn't show siblings stuck in "queued".
+	for _, d := range append([]dbsqlc.AlertDispatch{primary}, siblings...) {
+		tCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		if err := c.db.UpdatePushState(tCtx, dbsqlc.UpdatePushStateParams{
+			ID:        d.ID,
+			PushState: dbsqlc.PushStateSent,
+		}); err != nil {
+			slog.Error("cascade: update push state", "dispatch_id", d.ID, "err", err)
+		}
+		cancel()
 	}
 
 	// --- Branch by call_state (set by spray handler before calling Start) ---
-	if dispatch.CallState == dbsqlc.CallStateSkipped {
+	if primary.CallState == dbsqlc.CallStateSkipped {
 		// T- path: voice call is skipped, SMS is co-primary.
 		// Small deliberate pause to let the push notification settle.
 		time.Sleep(1 * time.Second)
-		c.fireSMS(ctx, dispatch)
+		c.fireSMS(ctx, primary)
 		return
 	}
 
-	// T / T+ path: make the voice call first, then arm the SMS fallback timer.
-	c.makeCall(ctx, dispatch)
-	c.scheduleSMSFallback(dispatchID, 60*time.Second)
+	// T / T+ path: push + voice call + SMS all fire immediately as co-primary
+	// channels. Push has already gone out above; SMS is independent of the
+	// call's outcome to maximise reach (any of the three confirms the alert).
+	// Unconfirmed timeout still arms — 30min escalation if none confirm.
+	c.makeCall(ctx, primary)
+	c.fireSMS(ctx, primary)
 	c.scheduleUnconfirmedTimeout(dispatchID)
+}
+
+// buildApiaryClause builds a Romanian phrase listing all affected apiaries
+// with their distances. Inputs come from a sorted-ascending-by-distance
+// slice of sibling dispatches. Examples:
+//
+//	1 apiary:  "la 0.2 km de Stupina Apahida Sud"
+//	2 apiary:  "la 0.2 km de Stupina Apahida Sud și 1.3 km de Stupina Apahida Nord"
+//	3+ apiary: "la 0.2 km de Stupina A, 0.8 km de Stupina B și 1.3 km de Stupina C"
+func (c *CascadeService) buildApiaryClause(ctx context.Context, dispatches []dbsqlc.AlertDispatch) (string, error) {
+	if len(dispatches) == 0 {
+		return "", fmt.Errorf("no dispatches")
+	}
+	parts := make([]string, 0, len(dispatches))
+	for i, d := range dispatches {
+		aCtx, aCancel := context.WithTimeout(ctx, 5*time.Second)
+		apiary, err := c.db.GetApiary(aCtx, d.ApiaryID)
+		aCancel()
+		if err != nil {
+			return "", fmt.Errorf("get apiary %s: %w", d.ApiaryID, err)
+		}
+		km := d.DistanceM / 1000.0
+		if i == 0 {
+			parts = append(parts, fmt.Sprintf("la %.1f km de %s", km, apiary.Name))
+		} else {
+			parts = append(parts, fmt.Sprintf("%.1f km de %s", km, apiary.Name))
+		}
+	}
+	switch len(parts) {
+	case 1:
+		return parts[0], nil
+	case 2:
+		return parts[0] + " și " + parts[1], nil
+	default:
+		return strings.Join(parts[:len(parts)-1], ", ") + " și " + parts[len(parts)-1], nil
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -177,16 +243,21 @@ func (c *CascadeService) makeCall(ctx context.Context, dispatch dbsqlc.AlertDisp
 	}
 
 	var callSID string
-	if c.notifier != nil {
-		callCtx, callCancel := context.WithTimeout(ctx, 10*time.Second)
-		defer callCancel()
+	callCtx, callCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer callCancel()
 
+	switch {
+	case c.notifier != nil:
 		callSID, err = c.notifier.MakeCall(callCtx, beekeeper.Phone, twimlURL)
 		if err != nil {
-			slog.Error("cascade: make call failed", "dispatch_id", dispatchID, "err", err)
-			// Do not abort; the SMS fallback timer will fire.
+			slog.Error("cascade: twilio make call failed", "dispatch_id", dispatchID, "err", err)
 		}
-	} else {
+	case c.elevenLabs != nil:
+		callSID, err = c.elevenLabs.OutboundCall(callCtx, beekeeper.Phone)
+		if err != nil {
+			slog.Error("cascade: elevenlabs outbound call failed", "dispatch_id", dispatchID, "err", err)
+		}
+	default:
 		callSID = "MOCK-" + dispatchID
 		slog.Info("cascade: [mock] voice call initiated",
 			"dispatch_id", dispatchID,
@@ -240,43 +311,50 @@ func (c *CascadeService) fireSMS(ctx context.Context, dispatch dbsqlc.AlertDispa
 		return
 	}
 
-	// Fetch beekeeper for phone number.
+	// Load all siblings (same beekeeper + spray) so the SMS lists every
+	// affected apiary in a single message.
+	sibCtx, sibCancel := context.WithTimeout(ctx, 10*time.Second)
+	siblings, err := c.db.ListDispatchSiblings(sibCtx, dbsqlc.ListDispatchSiblingsParams{
+		SprayReportID: fresh.SprayReportID,
+		BeekeeperID:   fresh.BeekeeperID,
+	})
+	sibCancel()
+	if err != nil {
+		slog.Warn("cascade: list siblings for SMS, falling back to primary only", "dispatch_id", dispatchID, "err", err)
+		siblings = []dbsqlc.AlertDispatch{fresh}
+	}
+
 	uCtx, uCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer uCancel()
 
-	beekeeper, err := c.db.GetUserByID(uCtx, dispatch.BeekeeperID)
+	beekeeper, err := c.db.GetUserByID(uCtx, fresh.BeekeeperID)
 	if err != nil {
 		slog.Error("cascade: get beekeeper for SMS", "dispatch_id", dispatchID, "err", err)
 		return
 	}
 
-	// Fetch spray report and apiary for message content.
 	srCtx, srCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer srCancel()
 
-	spray, err := c.db.GetSprayReport(srCtx, dispatch.SprayReportID)
+	spray, err := c.db.GetSprayReport(srCtx, fresh.SprayReportID)
 	if err != nil {
 		slog.Error("cascade: get spray report for SMS", "dispatch_id", dispatchID, "err", err)
 		return
 	}
 
-	aCtx, aCancel := context.WithTimeout(ctx, 10*time.Second)
-	defer aCancel()
-
-	apiary, err := c.db.GetApiary(aCtx, dispatch.ApiaryID)
+	apiaryClause, err := c.buildApiaryClause(ctx, siblings)
 	if err != nil {
-		slog.Error("cascade: get apiary for SMS", "dispatch_id", dispatchID, "err", err)
+		slog.Error("cascade: build apiary clause", "dispatch_id", dispatchID, "err", err)
 		return
 	}
 
 	body := fmt.Sprintf(
-		"ALERTĂ STUPINA: Tratament pesticid programat pentru %s pe parcela din %s la %.0fm de stupina %s. Substanță: %s (toxicitate %s). Răspundeți DA pentru confirmare.",
-		spray.ScheduledAt.Format("02.01.2006 15:04"),
+		"BeeLive — Salut %s! Un fermier va aplica %s pe %.0f ha pe %s, %s. Protejați stupii! Răspundeți DA pentru confirmare.",
+		beekeeper.FullName,
 		spray.Substance,
-		dispatch.DistanceM,
-		apiary.Name,
-		spray.Substance,
-		spray.Toxicity,
+		spray.SurfaceHa,
+		spray.ScheduledAt.Format("02.01"),
+		apiaryClause,
 	)
 
 	var smsSID string
@@ -299,7 +377,8 @@ func (c *CascadeService) fireSMS(ctx context.Context, dispatch dbsqlc.AlertDispa
 		)
 	}
 
-	// Persist the Twilio SMS SID (also sets sms_state='queued', sms_at=NOW()).
+	// Persist the Twilio SMS SID on the primary only (it owns the SID for
+	// reply-correlation). Siblings share the sms_state but not the SID.
 	sidCtx, sidCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer sidCancel()
 
@@ -310,15 +389,17 @@ func (c *CascadeService) fireSMS(ctx context.Context, dispatch dbsqlc.AlertDispa
 		slog.Error("cascade: set twilio sms sid", "dispatch_id", dispatchID, "err", err)
 	}
 
-	// Update sms_state to 'sent'.
-	stCtx, stCancel := context.WithTimeout(ctx, 10*time.Second)
-	defer stCancel()
-
-	if err := c.db.UpdateSMSState(stCtx, dbsqlc.UpdateSMSStateParams{
-		ID:       dispatch.ID,
-		SmsState: dbsqlc.SmsStateSent,
-	}); err != nil {
-		slog.Error("cascade: update sms state to sent", "dispatch_id", dispatchID, "err", err)
+	// sms_state=sent on primary and every sibling — so the alerts UI doesn't
+	// show siblings stuck in "queued".
+	for _, d := range siblings {
+		stCtx, stCancel := context.WithTimeout(ctx, 10*time.Second)
+		if err := c.db.UpdateSMSState(stCtx, dbsqlc.UpdateSMSStateParams{
+			ID:       d.ID,
+			SmsState: dbsqlc.SmsStateSent,
+		}); err != nil {
+			slog.Error("cascade: update sms state to sent", "dispatch_id", d.ID, "err", err)
+		}
+		stCancel()
 	}
 }
 
@@ -392,11 +473,66 @@ func (c *CascadeService) scheduleUnconfirmedTimeout(dispatchID string) {
 			slog.Info("cascade: dispatch marked unconfirmed", "dispatch_id", dispatchID)
 		}
 
+		// Propagate the unconfirmed status to siblings so the beekeeper's UI
+		// shows every apiary in the same final state.
+		gCtx, gCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		primary, err := c.db.GetAlertDispatch(gCtx, dispatchUUID)
+		gCancel()
+		if err == nil {
+			c.propagateFinalStatus(context.Background(), primary, dbsqlc.FinalStatusUnconfirmed)
+		} else {
+			slog.Warn("cascade: load primary for unconfirmed propagation", "dispatch_id", dispatchID, "err", err)
+		}
+
 		c.unconfirmedTimers.Delete("unconf:" + dispatchID)
 	})
 
 	c.unconfirmedTimers.Store("unconf:"+dispatchID, timer)
 	slog.Info("cascade: unconfirmed timeout scheduled", "dispatch_id", dispatchID)
+}
+
+// ---------------------------------------------------------------------------
+// State propagation: mirror the primary's resolution onto sibling dispatches
+// so the beekeeper's alert list shows every affected apiary as confirmed
+// (or unconfirmed) consistently — one phone confirmation covers them all.
+// ---------------------------------------------------------------------------
+
+// propagateFinalStatus copies the given final_status onto every sibling of
+// the primary (same spray + beekeeper, excluding the primary itself).
+// Failures are logged but not fatal — the primary's status is the source of
+// truth; sibling drift is recoverable.
+func (c *CascadeService) propagateFinalStatus(ctx context.Context, primary dbsqlc.AlertDispatch, status dbsqlc.FinalStatus) {
+	sibCtx, sibCancel := context.WithTimeout(ctx, 10*time.Second)
+	siblings, err := c.db.ListDispatchSiblings(sibCtx, dbsqlc.ListDispatchSiblingsParams{
+		SprayReportID: primary.SprayReportID,
+		BeekeeperID:   primary.BeekeeperID,
+	})
+	sibCancel()
+	if err != nil {
+		slog.Warn("cascade: list siblings for propagation", "primary_id", primary.ID, "err", err)
+		return
+	}
+	for _, d := range siblings {
+		if d.ID == primary.ID {
+			continue
+		}
+		uCtx, uCancel := context.WithTimeout(ctx, 10*time.Second)
+		if err := c.db.UpdateFinalStatus(uCtx, dbsqlc.UpdateFinalStatusParams{
+			ID:          d.ID,
+			FinalStatus: dbsqlc.NullFinalStatus{FinalStatus: status, Valid: true},
+		}); err != nil {
+			slog.Error("cascade: propagate final_status to sibling", "sibling_id", d.ID, "err", err)
+		}
+		uCancel()
+		// Cancel any pending timers a sibling might have inherited from legacy
+		// code paths. Belt and suspenders.
+		c.cancelSMSFallback(d.ID.String())
+		if v, ok := c.unconfirmedTimers.LoadAndDelete("unconf:" + d.ID.String()); ok {
+			if t, ok := v.(*time.Timer); ok {
+				t.Stop()
+			}
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -444,6 +580,8 @@ func (c *CascadeService) HandleCallConfirmed(ctx context.Context, callSID string
 		return fmt.Errorf("update final status confirmed_call: %w", err)
 	}
 
+	c.propagateFinalStatus(ctx, dispatch, dbsqlc.FinalStatusConfirmedCall)
+
 	actorID := dispatch.BeekeeperID.String()
 	if _, err := c.ledger.Append(ctx, nil, "alert.confirmed", &actorID, map[string]any{
 		"dispatch_id": dispatchID,
@@ -477,10 +615,9 @@ func (c *CascadeService) HandleCallTerminal(ctx context.Context, callSID, callSt
 		return fmt.Errorf("update call state terminal: %w", err)
 	}
 
-	// Fire SMS fallback immediately (delay=0).
-	c.scheduleSMSFallback(dispatch.ID.String(), 0)
-
-	slog.Info("cascade: call terminal, SMS fallback fired",
+	// SMS is co-primary and already fired during launchDispatch; the 30-min
+	// unconfirmed timeout is the only escalation path now.
+	slog.Info("cascade: call terminal",
 		"dispatch_id", dispatch.ID,
 		"call_status", callStatus,
 		"mapped_state", state,
@@ -519,6 +656,8 @@ func (c *CascadeService) HandleSMSConfirmed(ctx context.Context, smsSID string) 
 	}); err != nil {
 		return fmt.Errorf("update final status confirmed_sms: %w", err)
 	}
+
+	c.propagateFinalStatus(ctx, dispatch, dbsqlc.FinalStatusConfirmedSms)
 
 	// Cancel the unconfirmed-timeout timer.
 	if v, ok := c.unconfirmedTimers.LoadAndDelete("unconf:" + dispatchID); ok {
@@ -603,6 +742,8 @@ func (c *CascadeService) HandleInAppConfirm(ctx context.Context, dispatchID, act
 	if err != nil {
 		return "", fmt.Errorf("get dispatch after in-app confirm: %w", err)
 	}
+
+	c.propagateFinalStatus(ctx, dispatch, dbsqlc.FinalStatusConfirmedApp)
 
 	actorID := dispatch.BeekeeperID.String()
 	hash, err := c.ledger.Append(ctx, nil, "alert.confirmed", &actorID, map[string]any{
