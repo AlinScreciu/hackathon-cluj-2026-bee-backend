@@ -74,7 +74,15 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	slog.Info("beelive-api starting", "version", version, "port", cfg.Port, "env", cfg.AppEnv)
+	slog.Info("beelive-api starting",
+		"version", version,
+		"port", cfg.Port,
+		"env", cfg.AppEnv,
+		"app_base_url", cfg.AppBaseURL,
+		"cookie_domain", cfg.CookieDomain,
+		"geo_ai_base_url", cfg.GeoAIBaseURL,
+		"allowed_origins", cfg.AllowedOrigins,
+	)
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
