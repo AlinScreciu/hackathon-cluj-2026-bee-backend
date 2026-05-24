@@ -34,41 +34,90 @@ func maskCNP(cnp string) string {
 
 func (s *PDFService) GeneratePrimariePDF(spray domain.SprayReport, farmer domain.User, parcel domain.Parcel, affectedCount int, ledgerHash string) ([]byte, error) {
 	pdf := gofpdf.New("P", "mm", "A4", "")
-	pdf.SetMargins(20, 20, 20)
+	pdf.SetMargins(25, 25, 25)
 	pdf.AddPage()
 
-	// Title
-	pdf.SetFont("Helvetica", "B", 14)
-	pdf.CellFormat(170, 10, romanize("NOTIFICARE TRATAMENT PESTICID"), "", 1, "C", false, 0, "")
-	pdf.SetFont("Helvetica", "", 8)
-	pdf.CellFormat(170, 6, romanize("Sistem BeeLive (beelive.ro) — document generat automat"), "", 1, "C", false, 0, "")
-	pdf.Ln(4)
-
-	// Table helper
-	pdf.SetFont("Helvetica", "", 10)
-	row := func(label, value string) {
-		pdf.SetFont("Helvetica", "B", 10)
-		pdf.CellFormat(60, 8, romanize(label), "1", 0, "L", false, 0, "")
-		pdf.SetFont("Helvetica", "", 10)
-		pdf.CellFormat(110, 8, romanize(value), "1", 1, "L", false, 0, "")
+	docNumber := strings.ToUpper(strings.ReplaceAll(spray.ID, "-", ""))
+	if len(docNumber) > 8 {
+		docNumber = docNumber[:8]
 	}
 
-	row("Data tratamentului", spray.ScheduledAt.Format("02.01.2006 15:04"))
-	row("Substanta", spray.Substance)
-	row("Toxicitate", string(spray.Toxicity))
-	row("Suprafata (ha)", fmt.Sprintf("%.2f", spray.SurfaceHA))
-	row("Durata (ore)", fmt.Sprintf("%.1f", spray.DurationHours))
-	row("Fermier", farmer.FullName)
-	row("CNP fermier", maskCNP(farmer.CNP))
-	row("Parcela", parcel.Name)
-	row("Judet", parcel.County)
-	row("Localitate", parcel.Locality)
-	row("Apiarii afectate", fmt.Sprintf("%d", affectedCount))
-	row("Hash registru", ledgerHash)
+	// ── Header (top-left): who is filing + document number ──
+	pdf.SetFont("Helvetica", "B", 11)
+	pdf.CellFormat(0, 6, romanize(strings.ToUpper(farmer.FullName)), "", 1, "L", false, 0, "")
+	pdf.SetFont("Helvetica", "", 10)
+	pdf.CellFormat(0, 6, romanize(fmt.Sprintf("Nr. %s din %s", docNumber, spray.CreatedAt.Format("02.01.2006"))), "", 1, "L", false, 0, "")
 
+	pdf.Ln(16)
+
+	// ── Title ──
+	pdf.SetFont("Helvetica", "B", 18)
+	pdf.CellFormat(0, 10, romanize("ÎNȘTIINȚARE"), "", 1, "C", false, 0, "")
+	pdf.SetFont("Helvetica", "I", 10)
+	pdf.CellFormat(0, 6, romanize("Cu privire la tratamente fitosanitare"), "", 1, "C", false, 0, "")
 	pdf.Ln(8)
-	pdf.SetFont("Helvetica", "I", 8)
-	pdf.CellFormat(170, 6, romanize(fmt.Sprintf("Generat la: %s", time.Now().UTC().Format("02.01.2006 15:04:05 UTC"))), "", 1, "C", false, 0, "")
+
+	// ── Addressee ──
+	pdf.SetFont("Helvetica", "", 12)
+	pdf.CellFormat(0, 8, romanize(fmt.Sprintf("Către Primăria %s", parcel.Locality)), "", 1, "C", false, 0, "")
+	pdf.Ln(10)
+
+	// ── Body ──
+	const bodySize = 11.0
+	pdf.SetFont("Helvetica", "", bodySize)
+
+	intro := fmt.Sprintf(
+		"    Subscrisul %s, domiciliat în %s, județul %s, CNP %s, în calitate de exploatator agricol, vă înștiințez că în data de %s, pe o durată estimată de %.1f ore, voi efectua tratament fitosanitar prin stropire la cultura de %s pe parcela \"%s\" (nr. cadastral %s, %.2f ha), cu următorul produs:",
+		farmer.FullName,
+		parcel.Locality,
+		parcel.County,
+		maskCNP(farmer.CNP),
+		spray.ScheduledAt.Format("02.01.2006 ora 15:04"),
+		spray.DurationHours,
+		spray.Crop,
+		parcel.Name,
+		parcel.CadastralNumber,
+		spray.SurfaceHA,
+	)
+	pdf.MultiCell(0, 6, romanize(intro), "", "J", false)
+	pdf.Ln(3)
+
+	// Indented product line
+	pdf.SetFont("Helvetica", "B", bodySize)
+	pdf.SetX(45)
+	pdf.MultiCell(0, 6, romanize(fmt.Sprintf("%s — toxicitate %s", spray.Substance, string(spray.Toxicity))), "", "L", false)
+	pdf.Ln(4)
+
+	// Closing paragraph
+	pdf.SetFont("Helvetica", "", bodySize)
+	closing := fmt.Sprintf(
+		"    Toți crescătorii de albine din zonă sunt rugați să își ia măsurile necesare de protecție a albinelor. Prin sistemul BeeLive (beelive.ro), %d apicultori aflați în raza de risc au fost notificați automat în momentul înregistrării prezentei.",
+		affectedCount,
+	)
+	pdf.MultiCell(0, 6, romanize(closing), "", "J", false)
+
+	pdf.Ln(18)
+
+	// ── Footer: date + signature line ──
+	pdf.SetFont("Helvetica", "", bodySize)
+	pdf.CellFormat(80, 6, romanize(fmt.Sprintf("Data: %s", time.Now().Format("02.01.2006"))), "", 0, "L", false, 0, "")
+	pdf.CellFormat(0, 6, romanize("Semnătură:"), "", 1, "R", false, 0, "")
+
+	// Signature underline (right side)
+	pdf.SetX(140)
+	pdf.CellFormat(45, 14, "", "B", 1, "R", false, 0, "")
+
+	// ── BeeLive trailer with ledger hash for tamper-evidence ──
+	pdf.Ln(18)
+	pdf.SetDrawColor(180, 180, 180)
+	pdf.Line(25, pdf.GetY(), 185, pdf.GetY())
+	pdf.Ln(2)
+	pdf.SetFont("Helvetica", "I", 7)
+	pdf.CellFormat(0, 4, romanize("Document generat automat de sistemul BeeLive (beelive.ro). Înregistrare în registru distribuit, hash SHA-256:"), "", 1, "C", false, 0, "")
+	pdf.SetFont("Helvetica", "", 6)
+	pdf.CellFormat(0, 4, ledgerHash, "", 1, "C", false, 0, "")
+	pdf.SetFont("Helvetica", "I", 7)
+	pdf.CellFormat(0, 4, romanize(fmt.Sprintf("Generat la: %s", time.Now().UTC().Format("02.01.2006 15:04:05 UTC"))), "", 1, "C", false, 0, "")
 
 	var buf bytes.Buffer
 	if err := pdf.Output(&buf); err != nil {

@@ -23,6 +23,13 @@ type ApiaryRiskOutput struct {
 	ActiveAlerts    int      `json:"active_alerts"`
 }
 
+// LedgerEventSummary is a compact ledger event projection used in resource detail responses.
+type LedgerEventSummary struct {
+	Hash      string    `json:"hash"`
+	Type      string    `json:"type"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // ApiaryOutput is the typed response struct for a single apiary.
 type ApiaryOutput struct {
 	ID             string           `json:"id"`
@@ -287,7 +294,8 @@ func (h *Handlers) getApiary(ctx context.Context, input *struct {
 	ID string `path:"id"`
 }) (*struct {
 	Body struct {
-		Apiary ApiaryOutput `json:"apiary"`
+		Apiary  ApiaryOutput         `json:"apiary"`
+		History []LedgerEventSummary `json:"history"`
 	}
 }, error) {
 	user := middleware.UserFromContext(ctx)
@@ -317,12 +325,27 @@ func (h *Handlers) getApiary(ctx context.Context, input *struct {
 		return nil, huma.NewError(http.StatusNotFound, "Stupina nu a fost găsită")
 	}
 
+	events, err := h.ledgerSvc.ListByApiaryID(ctx, id.String())
+	if err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare internă")
+	}
+	history := make([]LedgerEventSummary, len(events))
+	for i, e := range events {
+		history[i] = LedgerEventSummary{
+			Hash:      e.Hash,
+			Type:      e.Type,
+			CreatedAt: e.CreatedAt,
+		}
+	}
+
 	out := &struct {
 		Body struct {
-			Apiary ApiaryOutput `json:"apiary"`
+			Apiary  ApiaryOutput         `json:"apiary"`
+			History []LedgerEventSummary `json:"history"`
 		}
 	}{}
 	out.Body.Apiary = mapApiary(row)
+	out.Body.History = history
 	return out, nil
 }
 

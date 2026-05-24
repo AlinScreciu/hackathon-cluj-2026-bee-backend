@@ -48,11 +48,17 @@ func (c *HTTPClient) Assess(ctx context.Context, req Request) (*Result, error) {
 	}
 
 	var apiResp struct {
-		RiskLevel                    string  `json:"riskLevel"`
-		NotifyBeekeepersWithinMeters float64 `json:"notifyBeekeepersWithinMeters"`
+		RiskScore                    float64         `json:"riskScore"`
+		RiskLevel                    string          `json:"riskLevel"`
+		Zones                        json.RawMessage `json:"zones"`
+		NotifyBeekeepersWithinMeters float64         `json:"notifyBeekeepersWithinMeters"`
 		WeatherUsed                  struct {
+			WindSpeedKmh         float64 `json:"windSpeedKmh"`
 			WindDirectionDegrees float64 `json:"windDirectionDegrees"`
 		} `json:"weatherUsed"`
+		Warnings          []string `json:"warnings"`
+		ExplanationRo     string   `json:"explanationRo"`
+		RecommendedAction string   `json:"recommendedAction"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
 		return nil, fmt.Errorf("geoai decode: %w", err)
@@ -60,9 +66,15 @@ func (c *HTTPClient) Assess(ctx context.Context, req Request) (*Result, error) {
 
 	radiusKm := apiResp.NotifyBeekeepersWithinMeters / 1000.0
 	return &Result{
-		RiskRadiusM:    apiResp.NotifyBeekeepersWithinMeters,
-		AffectedAreaKm: math.Pi * radiusKm * radiusKm,
-		WindDirDeg:     apiResp.WeatherUsed.WindDirectionDegrees,
-		Severity:       apiResp.RiskLevel,
+		RiskRadiusM:       apiResp.NotifyBeekeepersWithinMeters,
+		AffectedAreaKm:    math.Pi * radiusKm * radiusKm,
+		WindDirDeg:        apiResp.WeatherUsed.WindDirectionDegrees,
+		WindSpeedKmh:      apiResp.WeatherUsed.WindSpeedKmh,
+		Severity:          apiResp.RiskLevel,
+		RiskScore:         apiResp.RiskScore,
+		ExplanationRO:     apiResp.ExplanationRo,
+		RecommendedAction: apiResp.RecommendedAction,
+		Warnings:          apiResp.Warnings,
+		Zones:             apiResp.Zones,
 	}, nil
 }

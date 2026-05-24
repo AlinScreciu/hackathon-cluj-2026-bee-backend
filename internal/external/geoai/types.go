@@ -1,6 +1,9 @@
 package geoai
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 type Center struct {
 	Lat float64 `json:"lat"`
@@ -33,12 +36,19 @@ type Request struct {
 }
 
 // Result is the internal representation of the AI service response.
-// Mapped from the richer API response — only the fields needed by cascade.
+// Surfaces the user-visible AI output (explanation, recommendation, warnings,
+// zones) so the frontend can render it instead of throwing it away.
 type Result struct {
-	RiskRadiusM    float64 `json:"risk_radius_m"`
-	AffectedAreaKm float64 `json:"affected_area_km2"`
-	WindDirDeg     float64 `json:"wind_direction_deg"`
-	Severity       string  `json:"severity"` // "low" | "medium" | "high" | "very_high"
+	RiskRadiusM       float64         `json:"risk_radius_m"`
+	AffectedAreaKm    float64         `json:"affected_area_km2"`
+	WindDirDeg        float64         `json:"wind_direction_deg"`
+	WindSpeedKmh      float64         `json:"wind_speed_kmh"`
+	Severity          string          `json:"severity"` // "low" | "medium" | "high" | "very_high"
+	RiskScore         float64         `json:"risk_score"`
+	ExplanationRO     string          `json:"explanation_ro"`
+	RecommendedAction string          `json:"recommended_action"`
+	Warnings          []string        `json:"warnings"`
+	Zones             json.RawMessage `json:"zones,omitempty"` // GeoJSON FeatureCollection (A1–A4)
 }
 
 // Client is the interface implemented by both MockClient and HTTPClient.

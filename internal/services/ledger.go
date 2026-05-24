@@ -158,6 +158,22 @@ func (s *LedgerService) List(ctx context.Context, typeFilter, actorFilter string
 	return result, nil
 }
 
+// ListByApiaryID returns all ledger events whose payload references the given apiary_id,
+// ordered chronologically (oldest first). Returns an empty slice when no events exist.
+func (s *LedgerService) ListByApiaryID(ctx context.Context, apiaryID string) ([]domain.LedgerEvent, error) {
+	q := dbsqlc.New(s.sqlDB)
+	rows, err := q.ListLedgerEventsByApiaryID(ctx, apiaryID)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]domain.LedgerEvent, len(rows))
+	for i, r := range rows {
+		result[i] = dbLedgerToDomain(r)
+	}
+	return result, nil
+}
+
 // GetByHash returns a single event by hash along with its chain context (prev/next hashes).
 // Returns nil, nil, nil when the hash is not found (caller should return 404).
 func (s *LedgerService) GetByHash(ctx context.Context, hash string) (*domain.LedgerEvent, *LedgerChain, error) {

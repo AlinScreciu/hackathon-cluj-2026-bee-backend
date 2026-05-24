@@ -1,7 +1,17 @@
 -- name: CreateSprayReport :one
-INSERT INTO spray_reports (id, farmer_id, parcel_id, crop, substance, toxicity, surface_ha, scheduled_at, duration_hours, notes, ledger_hash)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+INSERT INTO spray_reports (id, farmer_id, parcel_id, crop, substance, toxicity, surface_ha, dose_kg_ha, scheduled_at, duration_hours, notes, ledger_hash)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 RETURNING *;
+
+-- name: UpdateSprayAIAssessment :exec
+UPDATE spray_reports SET
+    ai_risk_score         = $2,
+    ai_risk_level         = $3,
+    ai_explanation_ro     = $4,
+    ai_recommended_action = $5,
+    ai_warnings           = $6,
+    ai_zones              = $7
+WHERE id = $1;
 
 -- name: GetSprayReport :one
 SELECT * FROM spray_reports WHERE id = $1 LIMIT 1;

@@ -170,6 +170,55 @@ func Seed(ctx context.Context, pool *pgxpool.Pool) error {
 		}
 	}
 
+	// ── Backfill ledger hash for any apiary missing it ───────────────────────
+	// Seed historically inserted apiaries directly without emitting an
+	// `apiary.registered` event, leaving `ledger_hash = ''`. Live POST
+	// requests do it correctly; this loop fixes any seeded rows so the
+	// frontend can always render the "Dovadă" chip on the detail page.
+	// Idempotent: skips apiaries that already have a hash.
+	ledgerSvc := NewLedgerService(pool)
+	allApiaries, err := q.ListAllApiaries(ctx)
+	if err != nil {
+		return err
+	}
+	for _, a := range allApiaries {
+		if a.LedgerHash != "" {
+			continue
+		}
+		tx, err := sqlDB.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		txQ := dbsqlc.New(tx)
+		actorID := a.OwnerID.String()
+		startDateStr := a.StartDate.Format("2006-01-02")
+		ledgerHash, err := ledgerSvc.Append(ctx, tx, "apiary.registered", &actorID, map[string]any{
+			"apiary_id":  a.ID.String(),
+			"owner_id":   a.OwnerID.String(),
+			"name":       a.Name,
+			"type":       string(a.Type),
+			"lat":        a.Lat,
+			"lng":        a.Lng,
+			"hive_count": a.HiveCount,
+			"start_date": startDateStr,
+		})
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+		if err := txQ.UpdateApiaryLedgerHash(ctx, dbsqlc.UpdateApiaryLedgerHashParams{
+			ID:         a.ID,
+			LedgerHash: ledgerHash,
+		}); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		slog.Info("seed: backfilled apiary ledger hash", "name", a.Name, "hash", ledgerHash[:8])
+	}
+
 	// ── Seed 7 parcels ───────────────────────────────────────────────────────
 
 	type parcelSpec struct {

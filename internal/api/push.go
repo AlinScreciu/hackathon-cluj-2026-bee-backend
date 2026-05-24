@@ -58,7 +58,10 @@ func (h *Handlers) getVAPIDPublicKey(_ context.Context, _ *struct{}) (*struct {
 type CreatePushSubInput struct {
 	Body struct {
 		Endpoint string `json:"endpoint"`
-		Keys     struct {
+		// ExpirationTime is part of the browser PushSubscription.toJSON() shape;
+		// browsers always emit it (usually null). We accept and ignore it.
+		ExpirationTime *int64 `json:"expirationTime,omitempty"`
+		Keys           struct {
 			P256dh string `json:"p256dh"`
 			Auth   string `json:"auth"`
 		} `json:"keys"`

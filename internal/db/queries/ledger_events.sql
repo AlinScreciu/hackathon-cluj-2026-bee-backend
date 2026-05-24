@@ -30,3 +30,8 @@ SELECT * FROM ledger_events
 WHERE ($1::text = '' OR type = $1)
 ORDER BY created_at DESC
 LIMIT $2 OFFSET $3;
+
+-- name: ListLedgerEventsByApiaryID :many
+SELECT * FROM ledger_events
+WHERE payload->>'apiary_id' = $1::text
+ORDER BY created_at ASC;

@@ -8,7 +8,7 @@ This is a living doc during the hackathon: any change is opened as a PR comment 
 
 ## 0. Conventions
 
-**Base URL (dev):** `http://localhost:8080`
+**Base URL (dev):** `http://localhost:9090`
 **Base URL (deployed):** TBD
 **All paths prefixed:** `/api/v1`
 **Content-Type:** `application/json` (except PDF endpoints → `application/pdf`)
@@ -204,11 +204,34 @@ Body:
 {
   parcel_id: string
   surface_ha: number            // may differ from parcel default if partial
+  dose_kg_ha: number            // kg/ha as written on the product label
   crop: string                  // "rapiță", "porumb", ...
   substance: string             // exact label, e.g. "Confidor Energy"
   scheduled_at: string          // when spraying starts
   duration_hours: number        // estimated
   notes?: string
+}
+```
+
+### `POST /spray-reports/risk-preview`
+Same body shape as `POST /spray-reports` (minus `notes`). Runs the AI risk assessment without persisting a spray report. Used by the new-spray form to surface affected radius, GeoJSON risk zones (A1–A4), AI explanation and warnings before the farmer commits.
+
+Response 200:
+```ts
+{
+  risk_radius_m: number
+  affected_apiaries: number
+  parcel_lat: number
+  parcel_lng: number
+  toxicity: "T-" | "T" | "T+"
+  severity: "low" | "medium" | "high" | "very_high"
+  risk_score: number             // 0..1, from the AI
+  wind_direction_deg: number
+  wind_speed_kmh: number
+  explanation_ro: string         // Romanian-language explanation, ~2 sentences
+  recommended_action: string     // Romanian-language recommendation
+  warnings: string[]             // 0..N Romanian-language warnings
+  zones?: GeoJSONFeatureCollection  // A1=7km baseline; A2/A3/A4 when wind/tox extend it
 }
 ```
 Side effects (all wrapped in a single ledger event chain):
