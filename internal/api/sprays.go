@@ -814,14 +814,16 @@ func (h *Handlers) getPrimariePDF(w http.ResponseWriter, r *http.Request) {
 // Returns application/pdf — written via raw chi (not Huma) so binary bytes
 // flow without content-negotiation gymnastics.
 // Body: {farmer_id?: string, from: "YYYY-MM-DD", to: "YYYY-MM-DD"}.
-// When farmer_id is omitted the export covers every farmer in the window.
+// Inspector role: farmer_id optional — omit to export every farmer in the
+// window. Fermier role: farmer_id ignored — always force-scoped to the
+// authenticated user so a fermier can only download their own register.
 func (h *Handlers) rawANFExport(w http.ResponseWriter, r *http.Request) {
 	user := middleware.UserFromContext(r.Context())
 	if user == nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if user.Role != domain.RoleInspector {
+	if user.Role != domain.RoleInspector && user.Role != domain.RoleFermier {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -834,6 +836,11 @@ func (h *Handlers) rawANFExport(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid body", http.StatusBadRequest)
 		return
+	}
+
+	// Fermier: ignore any farmer_id in the body and force-scope to self.
+	if user.Role == domain.RoleFermier {
+		body.FarmerID = &user.ID
 	}
 
 	from, err := time.Parse("2006-01-02", body.From)
