@@ -6,9 +6,6 @@
 radarul-api
 *.exe
 
-# Generated sqlc code
-internal/db/sqlc/
-
 # Uploaded files
 uploads/
 
