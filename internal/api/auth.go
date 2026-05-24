@@ -78,14 +78,14 @@ type Verify2FAInput struct {
 	}
 }
 type Verify2FAOutput struct {
-	SetCookie string `header:"Set-Cookie"`
+	SetCookie []string `header:"Set-Cookie"`
 	Body      struct {
 		User any `json:"user"`
 	}
 }
 
 type LogoutOutput struct {
-	SetCookie string `header:"Set-Cookie"`
+	SetCookie []string `header:"Set-Cookie"`
 }
 
 type MeOutput struct {
@@ -124,15 +124,43 @@ func (h *Handlers) verify2FA(ctx context.Context, input *Verify2FAInput) (*Verif
 		return nil, err
 	}
 	out := &Verify2FAOutput{}
-	out.SetCookie = h.buildSessionCookie(token, 86400).String()
+	// Two Set-Cookie headers: first clears any leftover host-only ra_session
+	// (from before COOKIE_DOMAIN was configured), second sets the new
+	// domain-scoped session. Per RFC 6265 the host-only cookie is more
+	// specific and shadows the domain cookie, so without this clear the BE
+	// would keep reading a stale JWT with the old role.
+	out.SetCookie = []string{
+		clearHostOnlyCookie().String(),
+		h.buildSessionCookie(token, 86400).String(),
+	}
 	out.Body.User = user
 	return out, nil
 }
 
 func (h *Handlers) logout(_ context.Context, _ *struct{}) (*LogoutOutput, error) {
 	out := &LogoutOutput{}
-	out.SetCookie = h.buildSessionCookie("", -1).String()
+	// Clear both cookie scopes so logout actually logs the user out regardless
+	// of which Set-Cookie the browser still has from a past deploy.
+	out.SetCookie = []string{
+		clearHostOnlyCookie().String(),
+		h.buildSessionCookie("", -1).String(),
+	}
 	return out, nil
+}
+
+// clearHostOnlyCookie returns a Set-Cookie value that deletes any ra_session
+// cookie stored host-only against api.beelive.ro (no Domain attribute). Used
+// alongside buildSessionCookie so both possible cookie scopes get reconciled
+// on login and logout.
+func clearHostOnlyCookie() *http.Cookie {
+	return &http.Cookie{
+		Name:     "ra_session",
+		Value:    "",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Path:     "/",
+		MaxAge:   -1,
+	}
 }
 
 // buildSessionCookie produces the ra_session cookie used by login, sliding

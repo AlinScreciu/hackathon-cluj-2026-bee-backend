@@ -1,17 +1,26 @@
-// seed-users seeds prod-side users, parcels, and apiaries against the live DB.
-// Idempotent: re-running won't dupe and will reconcile role/phone/name changes.
+// prepare-for-demo wipes all user-generated data from the DB and reseeds the
+// canonical demo state. Schema, migrations, and the `substances` reference
+// table are preserved. Everything else (users, parcels, apiaries, spray
+// reports, alerts, ledger, push subs, damage claims, auth challenges) is
+// truncated.
 //
 // Layout for the demo trigger story:
+//   - Inspector Cluj keeps the inspector dashboard demoable.
 //   - Alin Screciu (fermier) owns "Parcela Cluj Centru" at 46.77, 23.59.
-//   - Marius Guriță (apicultor) has one apiary inside the 7km radius and one outside.
-//   - Alexandra Marian (apicultor) has one apiary inside the 7km radius and one outside.
-// When Alin creates a spray on the Cluj Centru parcel, the two "Aproape" apiaries
-// receive the alert; the two "Departe" apiaries don't.
+//   - Marius Guriță (apicultor) has one apiary inside the 7 km radius and one outside.
+//   - Alexandra Marian (apicultor) has one apiary inside the 7 km radius and one outside.
+//
+// When Alin creates a spray on the Cluj Centru parcel, the two "Aproape"
+// apiaries receive the alert; the two "Departe" apiaries don't.
+//
+// Safety: requires CONFIRM_WIPE=yes in the env to actually run, since this is
+// destructive against whatever DB you point it at.
 //
 // Usage:
 //
 //	DB_CONN_STR="postgres://...neon.tech/...?sslmode=require" \
-//	    go run ./cmd/seed-users
+//	CONFIRM_WIPE=yes \
+//	    go run ./cmd/prepare-for-demo
 package main
 
 import (
@@ -54,6 +63,8 @@ type seedApiary struct {
 }
 
 var users = []seedUser{
+	{FullName: "Inspector Județean Cluj", Email: "inspector@beelive.ro", Phone: "+40721000007",
+		Role: dbsqlc.UserRoleInspector, County: "Cluj", Locality: "Cluj-Napoca"},
 	{FullName: "Marius Guriță", Email: "guritaalex13@gmail.com", Phone: "+40756881589",
 		Role: dbsqlc.UserRoleApicultor, County: "Cluj", Locality: "Cluj-Napoca"},
 	{FullName: "Alin Screciu", Email: "alin.screciu01@gmail.com", Phone: "+40770241335",
@@ -89,12 +100,15 @@ func main() {
 	if conn == "" {
 		fatal("DB_CONN_STR is required")
 	}
+	if os.Getenv("CONFIRM_WIPE") != "yes" {
+		fatal("refusing to wipe — set CONFIRM_WIPE=yes to proceed (this DELETES all users, parcels, apiaries, sprays, alerts, ledger, etc. — schema and substances stay)")
+	}
 	password := os.Getenv("SEED_PASSWORD")
 	if password == "" {
 		password = "parola123"
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	pool, err := pgxpool.New(ctx, conn)
@@ -109,6 +123,13 @@ func main() {
 	if err != nil {
 		fatal("bcrypt: %v", err)
 	}
+
+	if err := wipe(ctx, db); err != nil {
+		fatal("wipe: %v", err)
+	}
+	fmt.Println("wiped: users, parcels, apiaries, spray_reports, alert_dispatches, ledger_events, push_subscriptions, damage_claims, damage_photos, auth_challenges")
+	fmt.Println("kept:  substances (reference data)")
+	fmt.Println()
 
 	ownerIDByEmail := map[string]uuid.UUID{}
 	for _, u := range users {
@@ -148,6 +169,30 @@ func main() {
 
 	fmt.Println("\ndone — login with the CNP listed above + 'parola123' + 2FA 000000")
 	fmt.Println("note: role changes do not delete orphan parcels/apiaries from a previous role")
+}
+
+// ── wipe ────────────────────────────────────────────────────────────────────
+
+// wipe truncates every user-generated table in one statement. CASCADE handles
+// FK references between alert_dispatches, ledger_events, spray_reports, etc.
+// `substances` is excluded — that's reference data populated by migrations.
+// RESTART IDENTITY is harmless here (no serial PKs) but cheap insurance.
+func wipe(ctx context.Context, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, `
+		TRUNCATE TABLE
+			alert_dispatches,
+			push_subscriptions,
+			damage_photos,
+			damage_claims,
+			ledger_events,
+			spray_reports,
+			auth_challenges,
+			apiaries,
+			parcels,
+			users
+		RESTART IDENTITY CASCADE
+	`)
+	return err
 }
 
 // ── upserts ─────────────────────────────────────────────────────────────────

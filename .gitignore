@@ -19,4 +19,4 @@ openapi.json
 
 # OS
 .DS_Store
-/seed-users
+/prepare-for-demo
