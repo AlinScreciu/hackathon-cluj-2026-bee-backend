@@ -183,7 +183,12 @@ func (h *Handlers) validateTwilioSignature(r *http.Request) bool {
 	}
 	sig := r.Header.Get("X-Twilio-Signature")
 	fullURL := h.cfg.AppBaseURL + r.URL.RequestURI()
-	return h.twilioClient.ValidateSignature(fullURL, r.Form, sig)
+	// Twilio's HMAC is over URL + sorted-concat of POST-body params only. URL
+	// query params are already baked into the URL portion of the HMAC; passing
+	// r.Form (which is URL query ∪ body) would double-count them and cause a
+	// signature mismatch on any webhook whose URL has a query string (e.g.
+	// .../voice/gather?dispatch_id=...).
+	return h.twilioClient.ValidateSignature(fullURL, r.PostForm, sig)
 }
 
 // buildVoiceAlertText looks up the dispatch, beekeeper, apiary and spray report
