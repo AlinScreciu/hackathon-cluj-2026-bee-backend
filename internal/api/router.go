@@ -96,7 +96,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool) (http.Handler, func()) {
 
 	var emailClient *email.EmailClient
 	if cfg.ResendAPIKey != "" {
-		emailClient = email.NewClient("smtp.resend.com", 465, "resend", cfg.ResendAPIKey, cfg.ResendFromEmail)
+		emailClient = email.NewClient(cfg.ResendAPIKey, cfg.ResendFromEmail)
 	} else {
 		slog.Warn("RESEND_API_KEY not set — email delivery disabled, codes logged to terminal only")
 	}
