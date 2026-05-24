@@ -80,8 +80,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool) (http.Handler, func()) {
 								Name:     "ra_session",
 								Value:    newToken,
 								HttpOnly: true,
+								Secure:   cfg.AppEnv == "production",
 								SameSite: http.SameSiteLaxMode,
 								Path:     "/",
+								Domain:   cfg.CookieDomain,
 								MaxAge:   86400,
 							})
 						}

@@ -123,24 +123,34 @@ func (h *Handlers) verify2FA(ctx context.Context, input *Verify2FAInput) (*Verif
 	if err != nil {
 		return nil, err
 	}
-	cookie := &http.Cookie{
-		Name:     "ra_session",
-		Value:    token,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Path:     "/",
-		MaxAge:   86400,
-	}
 	out := &Verify2FAOutput{}
-	out.SetCookie = cookie.String()
+	out.SetCookie = h.buildSessionCookie(token, 86400).String()
 	out.Body.User = user
 	return out, nil
 }
 
 func (h *Handlers) logout(_ context.Context, _ *struct{}) (*LogoutOutput, error) {
 	out := &LogoutOutput{}
-	out.SetCookie = "ra_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=-1"
+	out.SetCookie = h.buildSessionCookie("", -1).String()
 	return out, nil
+}
+
+// buildSessionCookie produces the ra_session cookie used by login, sliding
+// renewal, and logout. The Domain attribute comes from COOKIE_DOMAIN (empty
+// in dev → host-only cookie). Secure is enabled in production so browsers
+// will actually store the cookie on cross-origin HTTPS responses; required
+// for the FE on www.beelive.ro to share a cookie set by api.beelive.ro.
+func (h *Handlers) buildSessionCookie(token string, maxAge int) *http.Cookie {
+	return &http.Cookie{
+		Name:     "ra_session",
+		Value:    token,
+		HttpOnly: true,
+		Secure:   h.cfg.AppEnv == "production",
+		SameSite: http.SameSiteLaxMode,
+		Path:     "/",
+		Domain:   h.cfg.CookieDomain,
+		MaxAge:   maxAge,
+	}
 }
 
 func (h *Handlers) getMe(ctx context.Context, _ *struct{}) (*MeOutput, error) {

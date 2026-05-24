@@ -42,6 +42,12 @@ type Config struct {
 	R2Bucket          string `env:"R2_BUCKET"`
 
 	AllowedOrigins []string `env:"ALLOWED_ORIGINS" envSeparator:"," envDefault:"http://localhost:3000"`
+
+	// CookieDomain controls the Domain attribute on the ra_session cookie.
+	// Empty (default) → host-only cookie, only sent back to the API host.
+	// Set to ".beelive.ro" in prod so the cookie is shared across FE/BE
+	// subdomains (www.beelive.ro browses, api.beelive.ro authenticates).
+	CookieDomain string `env:"COOKIE_DOMAIN"`
 }
 
 // R2Enabled reports whether all required R2 settings are present.
