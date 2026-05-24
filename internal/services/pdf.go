@@ -129,46 +129,73 @@ func (s *PDFService) GeneratePrimariePDF(spray domain.SprayReport, farmer domain
 func (s *PDFService) GenerateANFExport(sprays []domain.SprayReport, farmer domain.User, ledgerHash string) ([]byte, error) {
 	pdf := gofpdf.New("L", "mm", "A4", "") // landscape for table
 	pdf.SetMargins(15, 15, 15)
+	pdf.SetAutoPageBreak(true, 15)
 	pdf.AddPage()
 
+	const usableW = 267.0 // A4 landscape 297 minus 2×15 margin
+
 	pdf.SetFont("Helvetica", "B", 13)
-	pdf.CellFormat(267, 10, romanize("EXPORT ANF - RAPOARTE TRATAMENTE"), "", 1, "C", false, 0, "")
+	pdf.CellFormat(usableW, 10, romanize("EXPORT ANF - RAPOARTE TRATAMENTE"), "", 1, "C", false, 0, "")
 	pdf.SetFont("Helvetica", "", 9)
-	pdf.CellFormat(267, 6, romanize(fmt.Sprintf("Fermier: %s | Hash: %s", farmer.FullName, ledgerHash)), "", 1, "C", false, 0, "")
+	headerHash := ledgerHash
+	if headerHash == "" {
+		headerHash = "—"
+	}
+	pdf.CellFormat(usableW, 6, romanize(fmt.Sprintf("Fermier: %s | Hash: %s", farmer.FullName, headerHash)), "", 1, "C", false, 0, "")
 	pdf.Ln(4)
 
-	// Header row
-	pdf.SetFont("Helvetica", "B", 9)
+	// Column widths sized so the longest realistic value fits at the body font
+	// (Helvetica 7pt ≈ 1.5mm/char). UUIDs are 36 chars (~54mm), SHA-256 hex
+	// hashes are 64 chars (~96mm) — those are the two that used to overflow.
 	cols := []struct {
 		label string
 		w     float64
 	}{
-		{"ID", 50}, {"Data", 28}, {"Substanta", 40}, {"Toxicitate", 22},
-		{"Suprafata", 22}, {"Status", 25}, {"Hash", 80},
+		{"ID", 58},
+		{"Data", 22},
+		{"Substanta", 38},
+		{"Toxicitate", 16},
+		{"Suprafata", 16},
+		{"Status", 20},
+		{"Hash", 97}, // 58+22+38+16+16+20+97 = 267
 	}
+
+	// Header row
+	pdf.SetFont("Helvetica", "B", 8)
 	for _, c := range cols {
 		pdf.CellFormat(c.w, 8, c.label, "1", 0, "C", false, 0, "")
 	}
 	pdf.Ln(-1)
 
-	pdf.SetFont("Helvetica", "", 8)
+	// Body
+	pdf.SetFont("Helvetica", "", 7)
 	for _, sp := range sprays {
-		pdf.CellFormat(50, 7, sp.ID, "1", 0, "L", false, 0, "")
-		pdf.CellFormat(28, 7, sp.ScheduledAt.Format("02.01.2006"), "1", 0, "C", false, 0, "")
-		pdf.CellFormat(40, 7, romanize(sp.Substance), "1", 0, "L", false, 0, "")
-		pdf.CellFormat(22, 7, string(sp.Toxicity), "1", 0, "C", false, 0, "")
-		pdf.CellFormat(22, 7, fmt.Sprintf("%.2f", sp.SurfaceHA), "1", 0, "R", false, 0, "")
-		pdf.CellFormat(25, 7, romanize(string(sp.Status)), "1", 0, "C", false, 0, "")
-		pdf.CellFormat(80, 7, sp.LedgerHash, "1", 1, "L", false, 0, "")
+		pdf.CellFormat(cols[0].w, 7, sp.ID, "1", 0, "L", false, 0, "")
+		pdf.CellFormat(cols[1].w, 7, sp.ScheduledAt.Format("02.01.2006"), "1", 0, "C", false, 0, "")
+		pdf.CellFormat(cols[2].w, 7, romanize(truncateRunes(sp.Substance, 30)), "1", 0, "L", false, 0, "")
+		pdf.CellFormat(cols[3].w, 7, string(sp.Toxicity), "1", 0, "C", false, 0, "")
+		pdf.CellFormat(cols[4].w, 7, fmt.Sprintf("%.2f", sp.SurfaceHA), "1", 0, "R", false, 0, "")
+		pdf.CellFormat(cols[5].w, 7, romanize(string(sp.Status)), "1", 0, "C", false, 0, "")
+		pdf.CellFormat(cols[6].w, 7, sp.LedgerHash, "1", 1, "L", false, 0, "")
 	}
 
 	pdf.Ln(4)
 	pdf.SetFont("Helvetica", "I", 8)
-	pdf.CellFormat(267, 6, romanize(fmt.Sprintf("Total: %d rapoarte | Generat: %s", len(sprays), time.Now().UTC().Format("02.01.2006 15:04:05 UTC"))), "", 1, "C", false, 0, "")
+	pdf.CellFormat(usableW, 6, romanize(fmt.Sprintf("Total: %d rapoarte | Generat: %s", len(sprays), time.Now().UTC().Format("02.01.2006 15:04:05 UTC"))), "", 1, "C", false, 0, "")
 
 	var buf bytes.Buffer
 	if err := pdf.Output(&buf); err != nil {
 		return nil, fmt.Errorf("pdf anf output: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// truncateRunes caps a string to n runes, appending an ellipsis when cut. Rune-
+// safe so Romanian diacritics survive without splitting a UTF-8 sequence.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-3]) + "..."
 }
