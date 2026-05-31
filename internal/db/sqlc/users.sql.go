@@ -79,6 +79,28 @@ func (q *Queries) GetUserByCNP(ctx context.Context, cnp string) (User, error) {
 	return i, err
 }
 
+const getUserByEmail = `-- name: GetUserByEmail :one
+SELECT id, cnp, full_name, email, phone, role, county, locality, password_hash, created_at FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1
+`
+
+func (q *Queries) GetUserByEmail(ctx context.Context, lower string) (User, error) {
+	row := q.db.QueryRowContext(ctx, getUserByEmail, lower)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Cnp,
+		&i.FullName,
+		&i.Email,
+		&i.Phone,
+		&i.Role,
+		&i.County,
+		&i.Locality,
+		&i.PasswordHash,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const getUserByID = `-- name: GetUserByID :one
 SELECT id, cnp, full_name, email, phone, role, county, locality, password_hash, created_at FROM users WHERE id = $1 LIMIT 1
 `

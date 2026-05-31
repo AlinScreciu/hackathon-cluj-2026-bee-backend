@@ -65,9 +65,9 @@ Maintained server-side. Provide via `GET /reference/substances` (see §10).
 ### `POST /auth/login`
 Body:
 ```ts
-{ cnp: string, password: string }
+{ identifier: string, password: string }
 ```
-Validation: CNP is 13 digits.
+Validation: `identifier` is either a 13-digit CNP or an email address (auto-detected by presence of `@`). Email lookup is case-insensitive.
 
 Response 200:
 ```ts

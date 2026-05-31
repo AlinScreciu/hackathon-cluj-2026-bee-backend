@@ -13,7 +13,7 @@ func registerAuth(api huma.API, h *Handlers) {
 		OperationID: "login",
 		Method:      http.MethodPost,
 		Path:        "/api/v1/auth/login",
-		Summary:     "Login with CNP and password",
+		Summary:     "Login with CNP or email and password",
 		Tags:        []string{"auth"},
 	}, h.login)
 
@@ -52,8 +52,10 @@ func registerAuth(api huma.API, h *Handlers) {
 
 type LoginInput struct {
 	Body struct {
-		CNP      string `json:"cnp" minLength:"13" maxLength:"13" pattern:"^[0-9]{13}$"`
-		Password string `json:"password" minLength:"1"`
+		// Identifier is either a 13-digit CNP or an email address. The service
+		// auto-detects which based on the presence of "@".
+		Identifier string `json:"identifier" minLength:"1" maxLength:"254"`
+		Password   string `json:"password" minLength:"1"`
 	}
 }
 type LoginOutput struct {
@@ -95,7 +97,7 @@ type MeOutput struct {
 }
 
 func (h *Handlers) login(ctx context.Context, input *LoginInput) (*LoginOutput, error) {
-	result, err := h.authSvc.Login(ctx, input.Body.CNP, input.Body.Password)
+	result, err := h.authSvc.Login(ctx, input.Body.Identifier, input.Body.Password)
 	if err != nil {
 		return nil, err
 	}
