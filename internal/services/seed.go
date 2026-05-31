@@ -33,6 +33,10 @@ func Seed(ctx context.Context, pool *pgxpool.Pool) error {
 		{ID: uuid.New(), Cnp: "2880721333444", FullName: "Elena Popa", Email: "elena.popa@test.com", Phone: "+40721000005", Role: dbsqlc.UserRoleFermier, County: "Cluj", Locality: "Gherla", PasswordHash: h},
 		{ID: uuid.New(), Cnp: "1751103555666", FullName: "Gheorghe Stan", Email: "gheorghe.stan@test.com", Phone: "+40721000006", Role: dbsqlc.UserRoleFermier, County: "Cluj", Locality: "Dej", PasswordHash: h},
 		{ID: uuid.New(), Cnp: "1680808777888", FullName: "Inspector Județean Cluj", Email: "inspector@test.com", Phone: "+40721000007", Role: dbsqlc.UserRoleInspector, County: "Cluj", Locality: "Cluj-Napoca", PasswordHash: h},
+		// Demo accounts — real emails/phones used during live presentation.
+		{ID: uuid.New(), Cnp: "2800604121673", FullName: "Marius Guriță", Email: "mgurita@proton.me", Phone: "+40756881589", Role: dbsqlc.UserRoleApicultor, County: "Cluj", Locality: "Apahida", PasswordHash: h},
+		{ID: uuid.New(), Cnp: "6020615124562", FullName: "Alexandra Marian", Email: "alexandramarian@proton.me", Phone: "+40731390001", Role: dbsqlc.UserRoleFermier, County: "Cluj", Locality: "Cluj-Napoca", PasswordHash: h},
+		{ID: uuid.New(), Cnp: "6020615124567", FullName: "Alexandra Marian", Email: "alexandra_marian_2002@yahoo.com", Phone: "+40731390001", Role: dbsqlc.UserRoleInspector, County: "Cluj", Locality: "Cluj-Napoca", PasswordHash: h},
 	}
 
 	seeded := 0
@@ -58,6 +62,7 @@ func Seed(ctx context.Context, pool *pgxpool.Pool) error {
 	for _, cnp := range []string{
 		"1850101123456", "2900215654321", "1780530987654",
 		"1920412111222", "2880721333444", "1751103555666",
+		"2800604121673", "6020615124562",
 	} {
 		u, err := q.GetUserByCNP(ctx, cnp)
 		if err != nil {
@@ -131,6 +136,16 @@ func Seed(ctx context.Context, pool *pgxpool.Pool) error {
 			lat:       46.5890, lng: 23.7910,
 			hiveCount: 20,
 			startDate: time.Date(2023, 8, 1, 0, 0, 0, 0, time.UTC),
+		},
+		// Marius Guriță — demo apicultor account. Placed in Apahida cluster
+		// so it sits inside the risk radius of Alexandra's parcel below.
+		{
+			ownerCNP:  "2800604121673",
+			name:      "Stupina Marius Apahida",
+			apiType:   dbsqlc.ApiaryTypePermanent,
+			lat:       46.7795, lng: 23.7175,
+			hiveCount: 16,
+			startDate: time.Date(2024, 4, 1, 0, 0, 0, 0, time.UTC),
 		},
 	}
 
@@ -277,6 +292,14 @@ func Seed(ctx context.Context, pool *pgxpool.Pool) error {
 			cadastralNumber: "CJ3003", lat: 47.1180, lng: 23.8620, surfaceHa: 4.2,
 			defaultCrop: sql.NullString{String: "porumb", Valid: true},
 			county: "Cluj", locality: "Dej",
+		},
+		// Alexandra Marian — demo fermier. Parcel sits ~1.5 km from Stupina
+		// Marius Apahida so a T+ spray here triggers his alert during the demo.
+		{
+			ownerCNP: "6020615124562", name: "Parcela Alexandra Apahida",
+			cadastralNumber: "CJ4001", lat: 46.7700, lng: 23.7250, surfaceHa: 6.5,
+			defaultCrop: sql.NullString{String: "rapiță", Valid: true},
+			county: "Cluj", locality: "Apahida",
 		},
 	}
 

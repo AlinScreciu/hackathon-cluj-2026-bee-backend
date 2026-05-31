@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 	dbsqlc "github.com/radarul-albinelor/api/internal/db/sqlc"
 	"github.com/radarul-albinelor/api/internal/domain"
+	"github.com/radarul-albinelor/api/internal/external/email"
 	"github.com/radarul-albinelor/api/internal/middleware"
 )
 
@@ -58,6 +60,14 @@ func registerDamage(api huma.API, h *Handlers) {
 		Summary:     "Mint a short-lived presigned PUT URL for a damage photo",
 		Tags:        []string{"uploads"},
 	}, h.signUpload)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "inspect-damage-claim",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/damage-claims/{id}/inspect",
+		Summary:     "Inspector confirms on-site inspection; status → under_review, email sent to primărie",
+		Tags:        []string{"damage-claims"},
+	}, h.inspectDamageClaim)
 }
 
 type DamageClaimOutput struct {
@@ -394,6 +404,223 @@ func (h *Handlers) getDamageClaim(ctx context.Context, input *struct {
 }
 
 // ---------------------------------------------------------------------------
+// POST /damage-claims/:id/inspect — inspector marks claim as inspected
+// ---------------------------------------------------------------------------
+
+type InspectDamageClaimOutput struct {
+	Body struct {
+		Status     string `json:"status"`
+		LedgerHash string `json:"ledger_hash"`
+		EmailSent  bool   `json:"email_sent"`
+		PDFGenerated bool `json:"pdf_generated"`
+	}
+}
+
+func (h *Handlers) inspectDamageClaim(ctx context.Context, input *struct {
+	ID string `path:"id"`
+}) (*InspectDamageClaimOutput, error) {
+	user := middleware.UserFromContext(ctx)
+	if user == nil {
+		return nil, huma.NewError(http.StatusUnauthorized, "Sesiune invalidă sau expirată")
+	}
+	if user.Role != domain.RoleInspector {
+		return nil, huma.NewError(http.StatusForbidden, "Doar inspectorii pot marca pagube ca inspectate")
+	}
+
+	claimID, err := uuid.Parse(input.ID)
+	if err != nil {
+		return nil, huma.NewError(http.StatusBadRequest, "ID invalid")
+	}
+
+	sqlDB := stdlib.OpenDBFromPool(h.pool)
+	q := dbsqlc.New(sqlDB)
+
+	claim, err := q.GetDamageClaim(ctx, claimID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, huma.NewError(http.StatusNotFound, "Reclamația nu a fost găsită")
+	}
+	if err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare internă")
+	}
+
+	if claim.Status != dbsqlc.DamageClaimStatusFiled {
+		return nil, huma.NewError(http.StatusBadRequest, "Reclamația a fost deja procesată")
+	}
+
+	// Fetch related entities for the PDF + email.
+	beekeeper, err := q.GetUserByID(ctx, claim.BeekeeperID)
+	if err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare la încărcarea apicultorului")
+	}
+	apiary, err := q.GetApiary(ctx, claim.ApiaryID)
+	if err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare la încărcarea stupinei")
+	}
+	var relatedSpray *dbsqlc.SprayReport
+	var relatedFarmer *dbsqlc.User
+	if claim.RelatedSprayID.Valid {
+		s, err := q.GetSprayReport(ctx, claim.RelatedSprayID.UUID)
+		if err == nil {
+			relatedSpray = &s
+			if f, err := q.GetUserByID(ctx, s.FarmerID); err == nil {
+				relatedFarmer = &f
+			}
+		}
+	}
+	inspector, err := q.GetUserByID(ctx, uuid.MustParse(user.ID))
+	if err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare la încărcarea inspectorului")
+	}
+
+	photos, _ := q.ListDamagePhotos(ctx, claimID)
+
+	// Update status to under_review.
+	if err := q.UpdateDamageClaimStatus(ctx, dbsqlc.UpdateDamageClaimStatusParams{
+		ID:     claimID,
+		Status: dbsqlc.DamageClaimStatusUnderReview,
+	}); err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare la actualizarea statusului")
+	}
+
+	// Append ledger event.
+	actorID := user.ID
+	inspectedAt := time.Now().UTC()
+	ledgerHash, err := h.ledgerSvc.Append(ctx, nil, "damage.inspected", &actorID, map[string]any{
+		"claim_id":     claimID.String(),
+		"apiary_id":    claim.ApiaryID.String(),
+		"beekeeper_id": claim.BeekeeperID.String(),
+		"inspector_id": user.ID,
+	})
+	if err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare la înregistrarea în ledger")
+	}
+
+	out := &InspectDamageClaimOutput{}
+	out.Body.Status = string(dbsqlc.DamageClaimStatusUnderReview)
+	out.Body.LedgerHash = ledgerHash
+
+	// Generate PDF + email in a goroutine so the response is fast. Failures
+	// here only affect emailing; the DB state is already committed.
+	go func() {
+		bgCtx := context.Background()
+		domClaim := damageRowToDomain(claim, []string{}, ledgerHash)
+		domBee := userRowToDomain(beekeeper)
+		domApiary := apiaryRowToDomain(apiary)
+		var domSpray *domain.SprayReport
+		var domFarmer *domain.User
+		if relatedSpray != nil {
+			s := sprayRowToDomain(*relatedSpray)
+			domSpray = &s
+		}
+		if relatedFarmer != nil {
+			f := userRowToDomain(*relatedFarmer)
+			domFarmer = &f
+		}
+		domInspector := userRowToDomain(inspector)
+
+		pdfBytes, err := h.pdfSvc.GenerateDamageInspectionReport(
+			domClaim, domBee, domApiary, domSpray, domFarmer, domInspector,
+			len(photos), inspectedAt,
+		)
+		if err != nil {
+			slog.Error("inspect damage: PDF gen failed", "err", err)
+			return
+		}
+
+		// Save a copy on disk for audit
+		_ = os.MkdirAll("uploads/pdfs", 0o755)
+		_ = os.WriteFile("uploads/pdfs/inspectie-"+claimID.String()+".pdf", pdfBytes, 0o644)
+
+		if h.emailClient == nil || h.cfg.PrimarieEmail == "" {
+			slog.Warn("inspect damage: email not configured, skipping send")
+			return
+		}
+
+		emailBody := fmt.Sprintf(
+			"Buna ziua,\n\n"+
+				"Va informam ca inspectorul %s a preluat reclamatia de paguba "+
+				"depusa de %s pentru stupina %s.\n\n"+
+				"Detalii: %d stupi afectati. Documentul oficial este atasat in PDF.\n\n"+
+				"Cod oficial: #%s\n\n"+
+				"Cu stima,\nSistem BeeLive",
+			inspector.FullName,
+			beekeeper.FullName,
+			apiary.Name,
+			claim.HiveLossCount,
+			truncateOrFull(ledgerHash, 12),
+		)
+		subject := fmt.Sprintf("[BeeLive] Sesizare inspectie paguba - %s", apiary.Name)
+		filename := "inspectie-" + truncateOrFull(claimID.String(), 8) + ".pdf"
+
+		if err := h.emailClient.SendWithAttachments(bgCtx, h.cfg.PrimarieEmail, subject, emailBody, []email.Attachment{
+			{Filename: filename, Content: pdfBytes},
+		}); err != nil {
+			slog.Error("inspect damage: email send failed", "err", err)
+			return
+		}
+		slog.Info("inspect damage: email sent to primarie", "to", h.cfg.PrimarieEmail, "claim_id", claimID)
+	}()
+
+	out.Body.EmailSent = true
+	out.Body.PDFGenerated = true
+	return out, nil
+}
+
+func truncateOrFull(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+// dbsqlc → domain converters used by the inspect handler.
+func userRowToDomain(u dbsqlc.User) domain.User {
+	return domain.User{
+		ID: u.ID.String(), CNP: u.Cnp, Name: u.FullName, FullName: u.FullName,
+		Email: u.Email, Phone: u.Phone, Role: domain.Role(u.Role),
+		County: u.County, Locality: u.Locality,
+	}
+}
+
+func apiaryRowToDomain(a dbsqlc.Apiary) domain.Apiary {
+	return domain.Apiary{
+		ID: a.ID.String(), OwnerID: a.OwnerID.String(),
+		Name: a.Name, Type: domain.ApiaryType(a.Type),
+		Lat: a.Lat, Lng: a.Lng, HiveCount: int(a.HiveCount),
+		StartDate: a.StartDate.Format("2006-01-02"),
+		CreatedAt: a.CreatedAt,
+	}
+}
+
+func sprayRowToDomain(s dbsqlc.SprayReport) domain.SprayReport {
+	return domain.SprayReport{
+		ID: s.ID.String(), FarmerID: s.FarmerID.String(), ParcelID: s.ParcelID.String(),
+		Crop: s.Crop, Substance: s.Substance, Toxicity: domain.Toxicity(s.Toxicity),
+		SurfaceHA: s.SurfaceHa, ScheduledAt: s.ScheduledAt, DurationHours: s.DurationHours,
+		Status: domain.SprayStatus(s.Status), AffectedApiariesCount: int(s.AffectedApiariesCount),
+		LedgerHash: s.LedgerHash, CreatedAt: s.CreatedAt,
+	}
+}
+
+func damageRowToDomain(d dbsqlc.DamageClaim, photos []string, hash string) domain.DamageClaim {
+	var relSpray *string
+	if d.RelatedSprayID.Valid {
+		s := d.RelatedSprayID.UUID.String()
+		relSpray = &s
+	}
+	h := d.LedgerHash
+	if hash != "" {
+		h = hash
+	}
+	return domain.DamageClaim{
+		ID: d.ID.String(), BeekeeperID: d.BeekeeperID.String(), ApiaryID: d.ApiaryID.String(),
+		RelatedSprayID: relSpray, Description: d.Description, HiveLossCount: int(d.HiveLossCount),
+		GpsLat: d.GpsLat, GpsLng: d.GpsLng, Status: domain.DamageClaimStatus(d.Status),
+		Photos: photos, LedgerHash: h, CreatedAt: d.CreatedAt,
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -411,6 +638,12 @@ func (h *Handlers) signedPhotoURLs(ctx context.Context, claimID uuid.UUID) ([]st
 	}
 	urls := make([]string, 0, len(photos))
 	for _, p := range photos {
+		// Pass-through for absolute public URLs (used by demo seed). The
+		// real flow stores R2 keys; we sign those for short-lived GET access.
+		if strings.HasPrefix(p.Url, "http://") || strings.HasPrefix(p.Url, "https://") {
+			urls = append(urls, p.Url)
+			continue
+		}
 		signed, err := h.storage.SignedURL(ctx, p.Url, photoSignedGetTTL)
 		if err != nil {
 			return nil, fmt.Errorf("sign photo: %w", err)

@@ -230,6 +230,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool) (http.Handler, func()) {
 	r.Handle("/uploads/*", http.StripPrefix("/uploads/", http.FileServer(http.Dir("uploads"))))
 	r.Get("/api/v1/spray-reports/{id}/primarie-pdf", h.getPrimariePDF)
 	r.Post("/api/v1/spray-reports/anf-export", h.rawANFExport)
+	r.Get("/api/v1/events/audit-report", h.rawAuditReport)
 
 	// Dev-only raw upload route. In prod (R2 backend) clients PUT directly to
 	// R2 via the presigned URL; this path is never used. Gated so a production

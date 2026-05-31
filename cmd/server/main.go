@@ -64,6 +64,43 @@ func main() {
 		os.Exit(0)
 	}
 
+	if len(os.Args) > 1 && os.Args[1] == "--seed-more" {
+		if err := services.Seed(ctx, pool); err != nil {
+			slog.Error("seed failed", "err", err)
+			os.Exit(1)
+		}
+		if err := services.SeedMore(ctx, pool); err != nil {
+			slog.Error("seed-more failed", "err", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "--demo-reset" {
+		// Ensure users/apiaries/parcels exist (idempotent), then wipe + reseed.
+		if err := services.Seed(ctx, pool); err != nil {
+			slog.Error("seed failed", "err", err)
+			os.Exit(1)
+		}
+		if err := services.SeedMore(ctx, pool); err != nil {
+			slog.Error("seed-more failed", "err", err)
+			os.Exit(1)
+		}
+		if err := services.SeedDemoReset(ctx, pool); err != nil {
+			slog.Error("demo-reset failed", "err", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	if len(os.Args) > 1 && os.Args[1] == "--demo-tamper" {
+		if err := services.SeedDemoTamper(ctx, pool); err != nil {
+			slog.Error("demo-tamper failed", "err", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	router, cascadeShutdown := api.NewRouter(cfg, pool)
 
 	srv := &http.Server{

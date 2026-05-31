@@ -9,6 +9,7 @@ package email
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,10 +35,22 @@ func NewClient(apiKey, from string) *EmailClient {
 }
 
 type sendRequest struct {
-	From    string   `json:"from"`
-	To      []string `json:"to"`
-	Subject string   `json:"subject"`
-	Text    string   `json:"text"`
+	From        string       `json:"from"`
+	To          []string     `json:"to"`
+	Subject     string       `json:"subject"`
+	Text        string       `json:"text"`
+	Attachments []attachment `json:"attachments,omitempty"`
+}
+
+// Attachment is a single email attachment, base64-encoded by Resend's API.
+type Attachment struct {
+	Filename string
+	Content  []byte
+}
+
+type attachment struct {
+	Filename string `json:"filename"`
+	Content  string `json:"content"` // base64
 }
 
 type sendResponse struct {
@@ -51,11 +64,25 @@ type errorResponse struct {
 }
 
 func (c *EmailClient) Send(ctx context.Context, to, subject, body string) error {
+	return c.SendWithAttachments(ctx, to, subject, body, nil)
+}
+
+// SendWithAttachments posts an email through Resend with optional binary
+// attachments (each base64-encoded as required by the Resend API).
+func (c *EmailClient) SendWithAttachments(ctx context.Context, to, subject, body string, atts []Attachment) error {
+	apiAtts := make([]attachment, 0, len(atts))
+	for _, a := range atts {
+		apiAtts = append(apiAtts, attachment{
+			Filename: a.Filename,
+			Content:  base64.StdEncoding.EncodeToString(a.Content),
+		})
+	}
 	payload, err := json.Marshal(sendRequest{
-		From:    c.from,
-		To:      []string{to},
-		Subject: subject,
-		Text:    body,
+		From:        c.from,
+		To:          []string{to},
+		Subject:     subject,
+		Text:        body,
+		Attachments: apiAtts,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)

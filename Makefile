@@ -32,6 +32,15 @@ sqlc-gen:
 seed:
 	go run ./cmd/server --seed
 
+seed-more:
+	go run ./cmd/server --seed-more
+
+demo-reset:
+	go run ./cmd/server --demo-reset
+
+demo-tamper:
+	go run ./cmd/server --demo-tamper
+
 test:
 	go test ./... -v -count=1
 
