@@ -53,8 +53,8 @@ func NewAuthService(pool *pgxpool.Pool, jwt *platform.JWTService, emailClient *e
 	}
 }
 
-func (s *AuthService) Login(ctx context.Context, cnp, password string) (*LoginResult, error) {
-	user, err := s.db.GetUserByCNP(ctx, cnp)
+func (s *AuthService) Login(ctx context.Context, identifier, password string) (*LoginResult, error) {
+	user, err := s.lookupUserByIdentifier(ctx, identifier)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, humaerr.NewError(http.StatusUnauthorized, "invalid_credentials")
@@ -65,10 +65,12 @@ func (s *AuthService) Login(ctx context.Context, cnp, password string) (*LoginRe
 		return nil, humaerr.NewError(http.StatusUnauthorized, "invalid_credentials")
 	}
 
-	method := dbsqlc.AuthMethodSms
-	if user.Phone == "" {
-		method = dbsqlc.AuthMethodEmail
-	}
+	// SMS 2FA disabled — force email.
+	// method := dbsqlc.AuthMethodSms
+	// if user.Phone == "" {
+	// 	method = dbsqlc.AuthMethodEmail
+	// }
+	method := dbsqlc.AuthMethodEmail
 
 	code := generateCode()
 	hash, err := bcrypt.GenerateFromPassword([]byte(code), 12)
@@ -96,6 +98,25 @@ func (s *AuthService) Login(ctx context.Context, cnp, password string) (*LoginRe
 		masked = maskedEmail(user.Email)
 	}
 	return &LoginResult{ChallengeID: challengeID.String(), Method: string(method), MaskedDestination: masked}, nil
+}
+
+// lookupUserByIdentifier accepts either an email (anything containing "@") or a
+// 13-digit CNP. Anything else returns sql.ErrNoRows so the caller's generic
+// "invalid_credentials" mapping handles it without leaking which form was wrong.
+func (s *AuthService) lookupUserByIdentifier(ctx context.Context, identifier string) (dbsqlc.User, error) {
+	id := strings.TrimSpace(identifier)
+	if strings.Contains(id, "@") {
+		return s.db.GetUserByEmail(ctx, strings.ToLower(id))
+	}
+	if len(id) != 13 {
+		return dbsqlc.User{}, sql.ErrNoRows
+	}
+	for _, r := range id {
+		if r < '0' || r > '9' {
+			return dbsqlc.User{}, sql.ErrNoRows
+		}
+	}
+	return s.db.GetUserByCNP(ctx, id)
 }
 
 func (s *AuthService) Switch2FAMethod(ctx context.Context, challengeIDStr, method string) (*LoginResult, error) {
@@ -209,12 +230,13 @@ func (s *AuthService) dispatchCode(ctx context.Context, user dbsqlc.User, method
 	emailSubject := "Cod autentificare BeeLive"
 	emailBody := fmt.Sprintf("Codul dumneavoastră: %s\n\nExpiră în 10 minute.", code)
 
-	// Send via SMS if the user has a phone (regardless of chosen method).
-	if user.Phone != "" {
-		if err := sendTwilioSMS(ctx, s.cfg, user.Phone, smsMsg); err != nil {
-			slog.Error("SMS dispatch failed", "user_id", user.ID, "err", err)
-		}
-	}
+	// SMS 2FA disabled — email-only for now.
+	// if user.Phone != "" {
+	// 	if err := sendTwilioSMS(ctx, s.cfg, user.Phone, smsMsg); err != nil {
+	// 		slog.Error("SMS dispatch failed", "user_id", user.ID, "err", err)
+	// 	}
+	// }
+	_ = smsMsg
 
 	// Send via email if the user has an email (regardless of chosen method).
 	if user.Email != "" {
