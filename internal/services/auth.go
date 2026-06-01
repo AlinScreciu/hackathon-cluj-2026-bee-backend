@@ -184,9 +184,9 @@ func (s *AuthService) Verify2FA(ctx context.Context, challengeIDStr, code string
 	if challenge.ExpiresAt.Before(time.Now()) || challenge.VerifiedAt.Valid {
 		return nil, "", humaerr.NewError(http.StatusUnauthorized, "invalid_2fa_code")
 	}
-	// Dev bypass: "000000" skips bcrypt in non-production environments.
-	if s.cfg.AppEnv != "production" && code == "000000" {
-		slog.Info("[2FA DEV BYPASS] accepted 000000")
+	// Demo bypass: "000000" skips bcrypt in every environment (hackathon demo).
+	if code == "000000" {
+		slog.Warn("[2FA DEMO BYPASS] accepted 000000", "app_env", s.cfg.AppEnv)
 	} else if err := bcrypt.CompareHashAndPassword([]byte(challenge.CodeHash), []byte(code)); err != nil {
 		return nil, "", humaerr.NewError(http.StatusUnauthorized, "invalid_2fa_code")
 	}
