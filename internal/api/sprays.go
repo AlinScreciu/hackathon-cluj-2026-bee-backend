@@ -817,12 +817,85 @@ func (h *Handlers) getPrimariePDF(w http.ResponseWriter, r *http.Request) {
 	}
 	id := chi.URLParam(r, "id")
 	pdfPath := filepath.Join("uploads", "pdfs", id+"-primarie.pdf")
-	if _, err := os.Stat(pdfPath); os.IsNotExist(err) {
-		http.Error(w, "not found", http.StatusNotFound)
+
+	// Happy path: a cached PDF file exists from the cascade goroutine.
+	if _, err := os.Stat(pdfPath); err == nil {
+		w.Header().Set("Content-Disposition", `attachment; filename="`+id+`-primarie.pdf"`)
+		http.ServeFile(w, r, pdfPath)
 		return
 	}
+
+	// Fallback: regenerate from DB so seeded/demo sprays (and any spray
+	// whose cached file was wiped) still serve a valid PDF instead of 404.
+	if h.pdfSvc == nil {
+		http.Error(w, "pdf service unavailable", http.StatusInternalServerError)
+		return
+	}
+	sprayID, err := uuid.Parse(id)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	ctx := r.Context()
+	q := dbsqlc.New(stdlib.OpenDBFromPool(h.pool))
+
+	spray, err := q.GetSprayReport(ctx, sprayID)
+	if errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "spray not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	farmer, err := q.GetUserByID(ctx, spray.FarmerID)
+	if err != nil {
+		http.Error(w, "farmer not found", http.StatusInternalServerError)
+		return
+	}
+	parcel, err := q.GetParcel(ctx, spray.ParcelID)
+	if err != nil {
+		http.Error(w, "parcel not found", http.StatusInternalServerError)
+		return
+	}
+
+	pdfBytes, err := h.pdfSvc.GeneratePrimariePDF(
+		sprayRowToDomain(spray),
+		userRowToDomain(farmer),
+		parcelRowToDomain(parcel),
+		int(spray.AffectedApiariesCount),
+		spray.LedgerHash,
+	)
+	if err != nil {
+		http.Error(w, "pdf generation failed", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/pdf")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+id+`-primarie.pdf"`)
-	http.ServeFile(w, r, pdfPath)
+	_, _ = w.Write(pdfBytes)
+}
+
+// parcelRowToDomain converts a dbsqlc.Parcel into the domain shape expected
+// by PDFService.GeneratePrimariePDF.
+func parcelRowToDomain(p dbsqlc.Parcel) domain.Parcel {
+	var crop *string
+	if p.DefaultCrop.Valid {
+		c := p.DefaultCrop.String
+		crop = &c
+	}
+	return domain.Parcel{
+		ID:              p.ID.String(),
+		OwnerID:         p.OwnerID.String(),
+		Name:            p.Name,
+		CadastralNumber: p.CadastralNumber,
+		Lat:             p.Lat,
+		Lng:             p.Lng,
+		SurfaceHA:       p.SurfaceHa,
+		DefaultCrop:     crop,
+		County:          p.County,
+		Locality:        p.Locality,
+	}
 }
 
 // rawANFExport handles POST /api/v1/spray-reports/anf-export.
