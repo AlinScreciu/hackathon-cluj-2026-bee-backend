@@ -226,28 +226,35 @@ func (s *AuthService) dispatchCode(ctx context.Context, user dbsqlc.User, method
 	// Always log plaintext code so dev can grab it from terminal immediately.
 	slog.Info("[2FA CODE]", "user_id", user.ID, "method", method, "code", code)
 
-	smsMsg := fmt.Sprintf("BeeLive: codul dvs. este %s. Expiră în 10 minute.", code)
-	emailSubject := "Cod autentificare BeeLive"
-	emailBody := fmt.Sprintf("Codul dumneavoastră: %s\n\nExpiră în 10 minute.", code)
+	// 2FA dispatch disabled for the hackathon demo — the "000000" bypass in
+	// Verify2FA is the only path that succeeds. Re-enable the block below to
+	// restore real email (and Twilio SMS, if uncommented) delivery.
+	_ = ctx
+	_ = method
+	/*
+		smsMsg := fmt.Sprintf("BeeLive: codul dvs. este %s. Expiră în 10 minute.", code)
+		emailSubject := "Cod autentificare BeeLive"
+		emailBody := fmt.Sprintf("Codul dumneavoastră: %s\n\nExpiră în 10 minute.", code)
 
-	// SMS 2FA disabled — email-only for now.
-	// if user.Phone != "" {
-	// 	if err := sendTwilioSMS(ctx, s.cfg, user.Phone, smsMsg); err != nil {
-	// 		slog.Error("SMS dispatch failed", "user_id", user.ID, "err", err)
-	// 	}
-	// }
-	_ = smsMsg
+		// SMS 2FA disabled — email-only for now.
+		// if user.Phone != "" {
+		// 	if err := sendTwilioSMS(ctx, s.cfg, user.Phone, smsMsg); err != nil {
+		// 		slog.Error("SMS dispatch failed", "user_id", user.ID, "err", err)
+		// 	}
+		// }
+		_ = smsMsg
 
-	// Send via email if the user has an email (regardless of chosen method).
-	if user.Email != "" {
-		if s.email != nil {
-			if err := s.email.Send(ctx, user.Email, emailSubject, emailBody); err != nil {
-				slog.Error("email dispatch failed", "user_id", user.ID, "err", err)
+		// Send via email if the user has an email (regardless of chosen method).
+		if user.Email != "" {
+			if s.email != nil {
+				if err := s.email.Send(ctx, user.Email, emailSubject, emailBody); err != nil {
+					slog.Error("email dispatch failed", "user_id", user.ID, "err", err)
+				}
+			} else {
+				slog.Info("[2FA EMAIL mock]", "user_id", user.ID, "code", code)
 			}
-		} else {
-			slog.Info("[2FA EMAIL mock]", "user_id", user.ID, "code", code)
 		}
-	}
+	*/
 }
 
 func sendTwilioSMS(ctx context.Context, cfg *config.Config, to, body string) error {
