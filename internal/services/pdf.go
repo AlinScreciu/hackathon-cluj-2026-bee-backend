@@ -555,6 +555,13 @@ func describeEventRO(
 			parts = append(parts, fmt.Sprintf("%.0f stupi afectati", loss))
 		}
 		return actor + " a depus o cerere de paguba", strings.Join(parts, " · ")
+	case "damage.inspected":
+		ap := apiaryName()
+		sub := ""
+		if ap != "" {
+			sub = "Stupina: " + ap
+		}
+		return actor + " a inspectat paguba pe teren", sub
 	case "pdf.generated":
 		return "Raport PDF oficial generat pentru primarie", ""
 	case "email.sent":
