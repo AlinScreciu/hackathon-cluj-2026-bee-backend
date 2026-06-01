@@ -147,8 +147,9 @@ type ListSprayReportsOutput struct {
 
 type GetSprayReportOutput struct {
 	Body struct {
-		SprayReport SprayReportResponse `json:"spray_report"`
-		Cascade     CascadeStatus       `json:"cascade"`
+		SprayReport SprayReportResponse  `json:"spray_report"`
+		Cascade     CascadeStatus        `json:"cascade"`
+		History     []LedgerEventSummary `json:"history"`
 	}
 }
 
@@ -693,9 +694,23 @@ func (h *Handlers) getSprayReport(ctx context.Context, input *struct {
 		return nil, fmt.Errorf("get parcel: %w", err)
 	}
 
+	events, err := h.ledgerSvc.ListBySprayID(ctx, sprayID.String())
+	if err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare internă")
+	}
+	history := make([]LedgerEventSummary, len(events))
+	for i, e := range events {
+		history[i] = LedgerEventSummary{
+			Hash:      e.Hash,
+			Type:      e.Type,
+			CreatedAt: e.CreatedAt,
+		}
+	}
+
 	out := &GetSprayReportOutput{}
 	out.Body.SprayReport = dbSprayToResponse(spray, parcel)
 	out.Body.Cascade = buildCascadeStatus(input.ID, dispatches, apiaryNames, beekeeperInitials)
+	out.Body.History = history
 	return out, nil
 }
 

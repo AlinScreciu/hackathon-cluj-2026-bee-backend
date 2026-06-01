@@ -13,6 +13,7 @@ import (
 	dbsqlc "github.com/radarul-albinelor/api/internal/db/sqlc"
 	"github.com/radarul-albinelor/api/internal/domain"
 	"github.com/radarul-albinelor/api/internal/middleware"
+	"github.com/radarul-albinelor/api/internal/services"
 )
 
 func registerInspector(api huma.API, h *Handlers) {
@@ -66,6 +67,9 @@ type inspectorMapSpray struct {
 	ScheduledAt   time.Time `json:"scheduled_at"`
 	DurationHours float64   `json:"duration_hours"`
 	Status        string    `json:"status"`
+	Lat           float64   `json:"lat"`
+	Lng           float64   `json:"lng"`
+	RadiusM       float64   `json:"radius_m"`
 }
 
 type inspectorMapClaim struct {
@@ -74,8 +78,8 @@ type inspectorMapClaim struct {
 	ApiaryID      string  `json:"apiary_id"`
 	Status        string  `json:"status"`
 	HiveLossCount int32   `json:"hive_loss_count"`
-	GpsLat        float64 `json:"gps_lat"`
-	GpsLng        float64 `json:"gps_lng"`
+	Lat           float64 `json:"lat"`
+	Lng           float64 `json:"lng"`
 }
 
 type InspectorMapDataOutput struct {
@@ -126,12 +130,48 @@ func (h *Handlers) inspectorMapData(ctx context.Context, input *struct {
 		return nil, huma.NewError(http.StatusInternalServerError, "Eroare internă")
 	}
 
+	allParcels, err := q.ListAllParcels(ctx)
+	if err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare internă")
+	}
+	parcelByID := make(map[uuid.UUID]dbsqlc.Parcel, len(allParcels))
+	for _, p := range allParcels {
+		parcelByID[p.ID] = p
+	}
+
+	// Precompute spray hot-zones so we can mark nearby apiaries "warning".
+	// An active spray (scheduled or in_progress) creates a circular hot-zone
+	// centered on its parcel with the toxicity-based radius.
+	type sprayZone struct {
+		lat, lng float64
+		radiusM  float64
+	}
+	var sprayZones []sprayZone
+	for _, s := range activeSprays {
+		parcel, ok := parcelByID[s.ParcelID]
+		if !ok {
+			continue
+		}
+		sprayZones = append(sprayZones, sprayZone{
+			lat:     parcel.Lat,
+			lng:     parcel.Lng,
+			radiusM: sprayRadiusByToxicity(s.Toxicity),
+		})
+	}
+
 	apiariesOut := make([]inspectorMapApiary, 0, len(allApiaries))
 	for _, a := range allApiaries {
 		if bboxValid && (a.Lat < minLat || a.Lat > maxLat || a.Lng < minLng || a.Lng > maxLng) {
 			continue
 		}
+		// damaged > warning > safe
 		status := "safe"
+		for _, z := range sprayZones {
+			if services.Haversine(z.lat, z.lng, a.Lat, a.Lng) <= z.radiusM {
+				status = "warning"
+				break
+			}
+		}
 		if apiaryHasOpenClaim[a.ID] {
 			status = "damaged"
 		}
@@ -150,6 +190,13 @@ func (h *Handlers) inspectorMapData(ctx context.Context, input *struct {
 
 	sprayOut := make([]inspectorMapSpray, 0, len(activeSprays))
 	for _, s := range activeSprays {
+		parcel, ok := parcelByID[s.ParcelID]
+		if !ok {
+			continue
+		}
+		if bboxValid && (parcel.Lat < minLat || parcel.Lat > maxLat || parcel.Lng < minLng || parcel.Lng > maxLng) {
+			continue
+		}
 		sprayOut = append(sprayOut, inspectorMapSpray{
 			ID:            s.ID.String(),
 			FarmerID:      s.FarmerID.String(),
@@ -160,6 +207,9 @@ func (h *Handlers) inspectorMapData(ctx context.Context, input *struct {
 			ScheduledAt:   s.ScheduledAt,
 			DurationHours: s.DurationHours,
 			Status:        string(s.Status),
+			Lat:           parcel.Lat,
+			Lng:           parcel.Lng,
+			RadiusM:       sprayRadiusByToxicity(s.Toxicity),
 		})
 	}
 
@@ -177,8 +227,8 @@ func (h *Handlers) inspectorMapData(ctx context.Context, input *struct {
 			ApiaryID:      c.ApiaryID.String(),
 			Status:        string(c.Status),
 			HiveLossCount: c.HiveLossCount,
-			GpsLat:        c.GpsLat,
-			GpsLng:        c.GpsLng,
+			Lat:           c.GpsLat,
+			Lng:           c.GpsLng,
 		})
 	}
 
@@ -187,6 +237,23 @@ func (h *Handlers) inspectorMapData(ctx context.Context, input *struct {
 	out.Body.ActiveSprays = sprayOut
 	out.Body.DamageClaims = claimsOut
 	return out, nil
+}
+
+// sprayRadiusByToxicity returns a display-only risk radius (in meters) for the
+// inspector map. The authoritative radius comes from the AI service at create
+// time and is reflected in alert_dispatches; for map circles we just need a
+// rough indicator so the inspector sees relative danger.
+func sprayRadiusByToxicity(toxicity string) float64 {
+	switch toxicity {
+	case "T+":
+		return 7000
+	case "T":
+		return 4500
+	case "T-":
+		return 2000
+	default:
+		return 3000
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +360,7 @@ type InspectorGetFarmerOutput struct {
 		SpraysLast30d     []inspectorRecentSpray `json:"sprays_last_30d"`
 		SpraysTotal       int                    `json:"sprays_total"`
 		DamagesFiledCount int                    `json:"damages_filed_against"`
+		History           []LedgerEventSummary   `json:"history"`
 	}
 }
 
@@ -354,6 +422,19 @@ func (h *Handlers) inspectorGetFarmer(ctx context.Context, input *struct {
 		}
 	}
 
+	events, err := h.ledgerSvc.ListByActorID(ctx, farmer.ID.String())
+	if err != nil {
+		return nil, huma.NewError(http.StatusInternalServerError, "Eroare internă")
+	}
+	history := make([]LedgerEventSummary, len(events))
+	for i, e := range events {
+		history[i] = LedgerEventSummary{
+			Hash:      e.Hash,
+			Type:      e.Type,
+			CreatedAt: e.CreatedAt,
+		}
+	}
+
 	out := &InspectorGetFarmerOutput{}
 	out.Body.Farmer = inspectorFarmerDetail{
 		ID:       farmer.ID.String(),
@@ -367,6 +448,7 @@ func (h *Handlers) inspectorGetFarmer(ctx context.Context, input *struct {
 	out.Body.SpraysLast30d = recent
 	out.Body.SpraysTotal = len(allSprays)
 	out.Body.DamagesFiledCount = damageCount
+	out.Body.History = history
 	return out, nil
 }
 

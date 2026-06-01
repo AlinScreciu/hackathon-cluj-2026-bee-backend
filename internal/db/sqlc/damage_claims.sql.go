@@ -204,3 +204,17 @@ func (q *Queries) ListDamagePhotos(ctx context.Context, damageClaimID uuid.UUID)
 	}
 	return items, nil
 }
+
+const updateDamageClaimStatus = `-- name: UpdateDamageClaimStatus :exec
+UPDATE damage_claims SET status = $2 WHERE id = $1
+`
+
+type UpdateDamageClaimStatusParams struct {
+	ID     uuid.UUID         `json:"id"`
+	Status DamageClaimStatus `json:"status"`
+}
+
+func (q *Queries) UpdateDamageClaimStatus(ctx context.Context, arg UpdateDamageClaimStatusParams) error {
+	_, err := q.db.ExecContext(ctx, updateDamageClaimStatus, arg.ID, arg.Status)
+	return err
+}

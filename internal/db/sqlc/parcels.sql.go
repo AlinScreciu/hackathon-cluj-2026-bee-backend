@@ -82,6 +82,44 @@ func (q *Queries) GetParcel(ctx context.Context, id uuid.UUID) (Parcel, error) {
 	return i, err
 }
 
+const listAllParcels = `-- name: ListAllParcels :many
+SELECT id, owner_id, name, cadastral_number, lat, lng, surface_ha, default_crop, county, locality FROM parcels ORDER BY name
+`
+
+func (q *Queries) ListAllParcels(ctx context.Context) ([]Parcel, error) {
+	rows, err := q.db.QueryContext(ctx, listAllParcels)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Parcel{}
+	for rows.Next() {
+		var i Parcel
+		if err := rows.Scan(
+			&i.ID,
+			&i.OwnerID,
+			&i.Name,
+			&i.CadastralNumber,
+			&i.Lat,
+			&i.Lng,
+			&i.SurfaceHa,
+			&i.DefaultCrop,
+			&i.County,
+			&i.Locality,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listParcelsByOwner = `-- name: ListParcelsByOwner :many
 SELECT id, owner_id, name, cadastral_number, lat, lng, surface_ha, default_crop, county, locality FROM parcels WHERE owner_id = $1 ORDER BY name
 `

@@ -12,6 +12,9 @@ SELECT * FROM damage_claims WHERE beekeeper_id = $1 ORDER BY created_at DESC;
 -- name: ListAllDamageClaims :many
 SELECT * FROM damage_claims ORDER BY created_at DESC;
 
+-- name: UpdateDamageClaimStatus :exec
+UPDATE damage_claims SET status = $2 WHERE id = $1;
+
 -- name: AddDamagePhoto :one
 INSERT INTO damage_photos (id, damage_claim_id, url)
 VALUES ($1, $2, $3)

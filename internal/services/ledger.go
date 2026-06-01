@@ -174,6 +174,44 @@ func (s *LedgerService) ListByApiaryID(ctx context.Context, apiaryID string) ([]
 	return result, nil
 }
 
+// ListBySprayID returns all ledger events whose payload references the given spray_id,
+// ordered chronologically. Used to render the per-spray audit trail on the spray
+// detail page (spray.created, alert.dispatched, pdf.generated, email.sent, …).
+func (s *LedgerService) ListBySprayID(ctx context.Context, sprayID string) ([]domain.LedgerEvent, error) {
+	q := dbsqlc.New(s.sqlDB)
+	rows, err := q.ListLedgerEventsBySprayID(ctx, sprayID)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]domain.LedgerEvent, len(rows))
+	for i, r := range rows {
+		result[i] = dbLedgerToDomain(r)
+	}
+	return result, nil
+}
+
+// ListByActorID returns all ledger events authored by the given actor (user ID),
+// ordered chronologically. Used to render the per-farmer activity trail on the
+// inspector farmer-detail page.
+func (s *LedgerService) ListByActorID(ctx context.Context, actorID string) ([]domain.LedgerEvent, error) {
+	actorUUID, err := uuid.Parse(actorID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid actor UUID: %w", err)
+	}
+	q := dbsqlc.New(s.sqlDB)
+	rows, err := q.ListLedgerEventsByActorID(ctx, uuid.NullUUID{UUID: actorUUID, Valid: true})
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]domain.LedgerEvent, len(rows))
+	for i, r := range rows {
+		result[i] = dbLedgerToDomain(r)
+	}
+	return result, nil
+}
+
 // GetByHash returns a single event by hash along with its chain context (prev/next hashes).
 // Returns nil, nil, nil when the hash is not found (caller should return 404).
 func (s *LedgerService) GetByHash(ctx context.Context, hash string) (*domain.LedgerEvent, *LedgerChain, error) {

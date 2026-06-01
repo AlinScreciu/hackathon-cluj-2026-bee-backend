@@ -35,3 +35,13 @@ LIMIT $2 OFFSET $3;
 SELECT * FROM ledger_events
 WHERE payload->>'apiary_id' = $1::text
 ORDER BY created_at ASC;
+
+-- name: ListLedgerEventsBySprayID :many
+SELECT * FROM ledger_events
+WHERE payload->>'spray_id' = $1::text
+ORDER BY created_at ASC;
+
+-- name: ListLedgerEventsByActorID :many
+SELECT * FROM ledger_events
+WHERE actor_id = $1
+ORDER BY created_at ASC;
